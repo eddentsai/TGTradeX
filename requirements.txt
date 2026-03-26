@@ -1,0 +1,4 @@
+requests>=2.31
+websocket-client>=1.7
+python-telegram-bot>=20.0
+python-dotenv>=1.0

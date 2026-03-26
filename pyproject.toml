@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "tgtradeX"
+version = "0.1.0"
+description = "透過 Telegram 訊息控制多交易所期貨開平倉的 Bot"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "requests>=2.31",
+    "websocket-client>=1.7",
+    "python-telegram-bot>=20.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.3",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["exchanges*", "bot*", "trader*", "config*"]
