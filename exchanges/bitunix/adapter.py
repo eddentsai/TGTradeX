@@ -44,4 +44,20 @@ class BitunixExchange(BaseExchange):
     def cancel_order(self, order_id: str, symbol: str) -> dict[str, Any]:
         if self._client.futures_private is None:
             raise RuntimeError("未設定 Bitunix credentials")
-        return self._client.futures_private.cancel_order(order_id=order_id, symbol=symbol)
+        return self._client.futures_private.cancel_orders(
+            symbol=symbol, order_list=[{"orderId": order_id}]
+        )
+
+    def get_klines(self, symbol: str, interval: str, limit: int = 250) -> list[dict[str, Any]]:
+        """
+        回傳由舊到新的 K 線列表。
+        Bitunix 欄位：time, open, high, low, close, volume
+        """
+        result = self._client.futures_public.get_kline(
+            symbol=symbol, interval=interval, limit=limit
+        )
+        # 確保由舊到新（有些交易所回傳由新到舊）
+        if len(result) >= 2:
+            if result[0].get("time", 0) > result[-1].get("time", 0):
+                result = list(reversed(result))
+        return result

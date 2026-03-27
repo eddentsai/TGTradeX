@@ -42,3 +42,9 @@ class BaseExchange(ABC):
     @abstractmethod
     def cancel_order(self, order_id: str, symbol: str) -> dict[str, Any]:
         """取消訂單"""
+
+    # ── 市場資料 ──────────────────────────────────────────────────────────────
+
+    @abstractmethod
+    def get_klines(self, symbol: str, interval: str, limit: int = 250) -> list[dict[str, Any]]:
+        """取得 K 線資料（由舊到新），每筆至少包含 time, open, high, low, close, volume"""
