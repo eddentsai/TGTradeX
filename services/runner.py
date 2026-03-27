@@ -112,9 +112,9 @@ class ServiceRunner:
         logger.info(
             f"[{self._symbol}] 市場={STATE_LABELS[state]}  "
             f"close={snap.close:.4f}  "
-            f"ADX={snap.adx:.1f if snap.adx else 'N/A'}  "
-            f"RSI={snap.rsi:.1f if snap.rsi else 'N/A'}  "
-            f"Vol%={snap.volatility_pct:.2f if snap.volatility_pct else 'N/A'}"
+            f"ADX={f'{snap.adx:.1f}' if snap.adx is not None else 'N/A'}  "
+            f"RSI={f'{snap.rsi:.1f}' if snap.rsi is not None else 'N/A'}  "
+            f"Vol%={f'{snap.volatility_pct:.2f}' if snap.volatility_pct is not None else 'N/A'}"
         )
 
         # 4. 核對倉位
