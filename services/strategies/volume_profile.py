@@ -3,15 +3,14 @@
 
 入場條件：
   - 震蕩市場中
-  - 計算過去 100 根 K 線的成交量分佈
-  - VAL-POC 價差 ≥ 0.5%（成交量分佈需有足夠價差）
-  - 價格接近 VAL（價值區下限）±1.5%
-  - RSI < 50
+  - VAL-POC 或 POC-VAH 價差 ≥ 0.15%（過濾無效成交量分佈）
+  - 多單：價格接近 VAL ±1.5%  且  RSI < 50
+  - 空單：價格接近 VAH ±1.5%  且  RSI > 55
 
-出場條件：
-  - 價格接近 POC（成交量最大的價格點）±1.5%
-  - 止損：VAL 下方 3%
-  - 止盈：POC 價格
+出場條件（單向，不會與入場重疊）：
+  - 多單：close >= take_profit（POC 價格）
+  - 空單：close <= take_profit（POC 價格）
+  - 止損：VAL 下方 3%（多）/ VAH 上方 3%（空）
 """
 from __future__ import annotations
 
@@ -36,59 +35,89 @@ class VolumeProfileStrategy(BaseStrategy):
         close = snap.close
         val   = snap.val
         poc   = snap.poc
+        vah   = snap.vah
         rsi   = snap.rsi
 
-        if val is None or poc is None or rsi is None:
+        if val is None or poc is None or vah is None or rsi is None:
             return Signal(action="hold", reason="指標資料不足（vol profile 或 RSI）")
 
-        # VAL-POC 最小價差檢查：價差不足代表成交量分佈過度集中，區間不清晰
-        poc_val_spread = (poc - val) / val if val > 0 else 0
-        if poc_val_spread < 0.005:
-            return Signal(
-                action="hold",
-                reason=f"VAL-POC 價差過小 ({poc_val_spread*100:.2f}%)，成交量分佈不清晰",
-            )
+        # VAL-POC / POC-VAH 最小價差：過濾所有量集中在單一價位的情況
+        spread_low  = (poc - val) / val if val > 0 else 0   # POC 離 VAL 多遠
+        spread_high = (vah - poc) / poc if poc > 0 else 0   # VAH 離 POC 多遠
 
-        near_val = abs(close - val) / val <= 0.015
-        rsi_ok   = rsi < 50.0
+        # ── 多單：價格接近 VAL，RSI 偏低 ────────────────────────────────────
+        if spread_low >= 0.0015:
+            near_val = abs(close - val) / val <= 0.015
+            rsi_ok   = rsi < 50.0
+            if near_val and rsi_ok:
+                stop_loss   = val * 0.97
+                take_profit = poc
+                return Signal(
+                    action="open_long",
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    reason=(
+                        f"接近 VAL={val:.2f} RSI={rsi:.1f} "
+                        f"POC={poc:.2f} SL={stop_loss:.2f} spread={spread_low*100:.2f}%"
+                    ),
+                )
 
-        if near_val and rsi_ok:
-            stop_loss   = val * 0.97
-            take_profit = poc
-            return Signal(
-                action="open_long",
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                reason=(
-                    f"接近 VAL={val:.2f} RSI={rsi:.1f} "
-                    f"POC={poc:.2f} SL={stop_loss:.2f} "
-                    f"spread={poc_val_spread*100:.2f}%"
-                ),
-            )
+        # ── 空單：價格接近 VAH，RSI 偏高 ────────────────────────────────────
+        if spread_high >= 0.0015:
+            near_vah = abs(close - vah) / vah <= 0.015
+            rsi_ok   = rsi > 55.0
+            if near_vah and rsi_ok:
+                stop_loss   = vah * 1.03
+                take_profit = poc
+                return Signal(
+                    action="open_short",
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    reason=(
+                        f"接近 VAH={vah:.2f} RSI={rsi:.1f} "
+                        f"POC={poc:.2f} SL={stop_loss:.2f} spread={spread_high*100:.2f}%"
+                    ),
+                )
 
+        reasons = []
+        if spread_low  < 0.0015: reasons.append(f"low-spread={spread_low*100:.2f}%")
+        if spread_high < 0.0015: reasons.append(f"high-spread={spread_high*100:.2f}%")
         return Signal(
             action="hold",
-            reason=f"未達入場條件 near_val={near_val} rsi_ok={rsi_ok} (RSI={rsi:.1f})",
+            reason=f"未達入場條件 RSI={rsi:.1f} {' '.join(reasons)}",
         )
 
-    # ── 出場 ──────────────────────────────────────────────────────────────────
+    # ── 出場（單向，不與入場重疊）─────────────────────────────────────────────
 
     def _check_exit(self, snap: IndicatorSnapshot, pos: ActivePosition) -> Signal:
         close = snap.close
-        poc   = snap.poc
 
-        # 止損
-        if close <= pos.stop_loss:
-            return Signal(
-                action="close",
-                reason=f"觸發止損 price={close:.2f} SL={pos.stop_loss:.2f}",
-            )
+        if pos.side == "BUY":
+            # 止損
+            if close <= pos.stop_loss:
+                return Signal(
+                    action="close",
+                    reason=f"觸發止損 price={close:.2f} SL={pos.stop_loss:.2f}",
+                )
+            # 止盈（價格到達或超過 POC）
+            if close >= pos.take_profit:
+                return Signal(
+                    action="close",
+                    reason=f"達到止盈 price={close:.2f} TP={pos.take_profit:.2f}",
+                )
 
-        # 止盈（接近 POC）
-        if poc is not None and abs(close - poc) / poc <= 0.015:
-            return Signal(
-                action="close",
-                reason=f"接近 POC={poc:.2f} price={close:.2f}，達到止盈目標",
-            )
+        else:  # SELL
+            # 止損
+            if close >= pos.stop_loss:
+                return Signal(
+                    action="close",
+                    reason=f"觸發止損 price={close:.2f} SL={pos.stop_loss:.2f}",
+                )
+            # 止盈（價格下跌到或低於 POC）
+            if close <= pos.take_profit:
+                return Signal(
+                    action="close",
+                    reason=f"達到止盈 price={close:.2f} TP={pos.take_profit:.2f}",
+                )
 
         return Signal(action="hold", reason=f"持倉中 price={close:.2f}")
