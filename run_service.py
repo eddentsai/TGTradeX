@@ -85,6 +85,10 @@ def main() -> None:
         "--dry-run", action="store_true",
         help="模擬模式：只記錄信號，不實際下單",
     )
+    parser.add_argument(
+        "--start-delay", type=int, default=0,
+        help="啟動前等待秒數（同時跑多個 instance 時用來錯開 API 請求，例如 0 / 30 / 60）",
+    )
     args = parser.parse_args()
 
     # 驗證參數
@@ -121,6 +125,13 @@ def main() -> None:
             f"清算價參考（{args.leverage}x 多單）: "
             f"entry × {(1 - 1/args.leverage + 0.005):.3f}"
         )
+
+    if args.start_delay > 0:
+        logging.getLogger(__name__).info(
+            f"等待 {args.start_delay}s 後啟動（錯開 API 請求）..."
+        )
+        import time as _time
+        _time.sleep(args.start_delay)
 
     runner.run()
 

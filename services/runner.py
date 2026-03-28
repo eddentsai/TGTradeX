@@ -20,6 +20,29 @@ from services.strategies.volume_profile import VolumeProfileStrategy
 
 logger = logging.getLogger(__name__)
 
+
+def _is_transient_error(e: Exception) -> bool:
+    """
+    判斷是否為可重試的暫時性網路錯誤。
+    - 訊息含 '逾時' / 'timeout' / 'timed out' / 'connection'
+    - 或 cause 是 requests 的 ReadTimeout / ConnectionError
+    """
+    msg = str(e).lower()
+    if any(k in msg for k in ("逾時", "timeout", "timed out", "connection reset")):
+        return True
+    cause = getattr(e, "__cause__", None)
+    if cause is not None:
+        try:
+            from requests.exceptions import (
+                ReadTimeout,
+                ConnectionError as ReqConnectionError,
+            )
+            if isinstance(cause, (ReadTimeout, ReqConnectionError)):
+                return True
+        except ImportError:
+            pass
+    return False
+
 _INTERVAL_SECONDS: dict[str, int] = {
     "1m": 60, "3m": 180, "5m": 300, "15m": 900,
     "30m": 1800, "1h": 3600, "2h": 7200, "4h": 14400,
@@ -85,14 +108,40 @@ class ServiceRunner:
         )
         while True:
             try:
-                self._run_cycle()
+                self._run_cycle_with_retry()
             except KeyboardInterrupt:
                 logger.info("收到中斷信號，服務停止")
                 break
             except Exception as e:
-                logger.exception(f"週期執行錯誤: {e}")
+                logger.exception(f"週期執行錯誤（非暫時性，跳過本週期）: {e}")
             logger.debug(f"睡眠 {self._sleep_sec} 秒，等待下一根 K 線")
             time.sleep(self._sleep_sec)
+
+    # ── 暫時性錯誤重試 ────────────────────────────────────────────────────────
+
+    def _run_cycle_with_retry(self, max_retries: int = 3, retry_delay: int = 20) -> None:
+        """
+        執行一次週期，對暫時性網路錯誤（timeout / connection）自動重試。
+        非網路錯誤（邏輯錯誤、API 業務錯誤）直接拋出，不重試。
+        """
+        for attempt in range(1, max_retries + 1):
+            try:
+                self._run_cycle()
+                return
+            except Exception as e:
+                if not _is_transient_error(e):
+                    raise
+                if attempt == max_retries:
+                    logger.error(
+                        f"[{self._symbol}] 網路錯誤，已重試 {max_retries} 次仍失敗，"
+                        f"跳過本週期: {e}"
+                    )
+                    return   # 不 raise，讓主迴圈繼續等下一根 K 線
+                logger.warning(
+                    f"[{self._symbol}] 網路錯誤（第 {attempt}/{max_retries} 次），"
+                    f"{retry_delay}s 後重試: {e}"
+                )
+                time.sleep(retry_delay)
 
     # ── 單次決策週期 ──────────────────────────────────────────────────────────
 
