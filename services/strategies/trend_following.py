@@ -84,8 +84,13 @@ class TrendFollowingStrategy(BaseStrategy):
                 reason=f"觸發止盈 price={close:.2f} TP={pos.take_profit:.2f}",
             )
 
-        # EMA20 開始向下
-        if ema20 is not None and ema20_prev is not None and ema20 < ema20_prev:
+        # EMA20 開始向下（需下降超過 0.03% 才算真正轉向，過濾浮點微差與橫盤震動）
+        if (
+            ema20 is not None
+            and ema20_prev is not None
+            and ema20_prev > 0
+            and (ema20_prev - ema20) / ema20_prev >= 0.0003
+        ):
             return Signal(
                 action="close",
                 reason=f"EMA20 下彎 ({ema20:.2f} < {ema20_prev:.2f})",

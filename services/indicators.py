@@ -100,7 +100,7 @@ def compute_indicators(candles: list[Candle]) -> IndicatorSnapshot:
     bb_mid, bb_upper, bb_lower = _latest_bb(closes, 20, 2.0)
     lr_slope = _lr_slope(closes, 20)
     vol_pct  = _volatility(closes, 20)
-    poc, val, vah = _volume_profile(candles[-100:], 50)
+    poc, val, vah = _volume_profile(candles, 50)
 
     # 衍生 BB 指標
     bb_width_pct = None

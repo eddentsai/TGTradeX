@@ -49,6 +49,15 @@ _INTERVAL_SECONDS: dict[str, int] = {
     "6h": 21600, "12h": 43200, "1d": 86400,
 }
 
+# 各週期 K 線 fetch 數量（volume profile 用全部，需覆蓋足夠的歷史）
+# 15m=1週, 1h=1個月, 4h=3個月, 1d=6個月，其他保守預設
+_KLINE_LIMIT: dict[str, int] = {
+    "15m": 700,   # 7 天 × 24h × 4 = 672 根
+    "1h":  750,   # 30 天 × 24 = 720 根
+    "4h":  560,   # 90 天 × 6 = 540 根
+    "1d":  200,   # 180 天，加 buffer
+}
+
 
 class ServiceRunner:
     """
@@ -163,7 +172,10 @@ class ServiceRunner:
 
     def _run_cycle(self) -> None:
         # 1. 取得 K 線
-        raw     = self._exchange.get_klines(self._symbol, self._interval, limit=250)
+        raw     = self._exchange.get_klines(
+            self._symbol, self._interval,
+            limit=_KLINE_LIMIT.get(self._interval, 500),
+        )
         candles = candles_from_raw(raw)
         if len(candles) < 30:
             logger.warning(f"K 線數量不足 ({len(candles)} 根)，跳過")
@@ -243,6 +255,7 @@ class ServiceRunner:
                 f"持倉獲利，止損移至保本 {active_pos.entry_price:.4f}  "
                 f"（原 SL={old_sl:.4f}）"
             )
+            active_pos.strategy_name = current_strategy_name  # 避免重複觸發切換邏輯
         else:
             # 虧損中：立即平倉，開倉條件不再成立
             logger.info(
