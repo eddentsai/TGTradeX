@@ -61,3 +61,10 @@ class BitunixExchange(BaseExchange):
             if result[0].get("time", 0) > result[-1].get("time", 0):
                 result = list(reversed(result))
         return result
+
+    def get_qty_precision(self, symbol: str) -> int:
+        """從 Bitunix 合約規格取得數量精度（basePrecision 欄位）"""
+        pairs = self._client.futures_public.get_trading_pairs(symbol)
+        if not pairs:
+            raise ValueError(f"找不到交易對: {symbol}")
+        return int(pairs[0].get("basePrecision", 3))

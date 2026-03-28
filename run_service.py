@@ -3,6 +3,7 @@ TGTradeX 自動交易服務進入點
 
 啟動方式（自動倉位計算）：
     python run_service.py --exchange bitunix --symbol BTCUSDT --leverage 4
+    python run_service.py --exchange binance --symbol BTCUSDT --leverage 4
 
 啟動方式（固定數量覆蓋）：
     python run_service.py --exchange bitunix --symbol BTCUSDT --leverage 4 --qty 0.001
@@ -11,7 +12,8 @@ TGTradeX 自動交易服務進入點
     python run_service.py --exchange bitunix --symbol BTCUSDT --leverage 4 --dry-run
 
 必要環境變數（或 .env）：
-    BITUNIX_API_KEY / BITUNIX_SECRET_KEY
+    Bitunix: BITUNIX_API_KEY / BITUNIX_SECRET_KEY
+    Binance: BINANCE_API_KEY / BINANCE_SECRET_KEY
 """
 from __future__ import annotations
 
@@ -35,7 +37,13 @@ def _build_exchange(name: str):
             api_key=settings.BITUNIX_API_KEY,
             secret_key=settings.BITUNIX_SECRET_KEY,
         )
-    raise ValueError(f"不支援的交易所: {name}（目前支援: bitunix）")
+    if name == "binance":
+        from exchanges.binance.adapter import BinanceExchange
+        return BinanceExchange(
+            api_key=settings.BINANCE_API_KEY,
+            secret_key=settings.BINANCE_SECRET_KEY,
+        )
+    raise ValueError(f"不支援的交易所: {name}（目前支援: bitunix, binance）")
 
 
 def main() -> None:
@@ -53,7 +61,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--exchange", required=True,
-        choices=["bitunix"],
+        choices=["bitunix", "binance"],
         help="交易所名稱",
     )
     parser.add_argument(
@@ -69,8 +77,8 @@ def main() -> None:
         help="每次最大風險比例 %%（預設 1.0 = 1%%）",
     )
     parser.add_argument(
-        "--qty-precision", type=int, default=3,
-        help="數量小數位數（預設 3，BTC 用 3，ETH 可用 2）",
+        "--qty-precision", type=int, default=None,
+        help="數量小數位數（不填則自動從交易所查詢）",
     )
     parser.add_argument(
         "--qty", default=None,
@@ -97,16 +105,24 @@ def main() -> None:
     if not (0.1 <= args.risk_pct <= 5.0):
         parser.error("--risk-pct 建議在 0.1–5.0 之間（超過 5% 風險過高）")
 
-    settings.validate()
+    settings.validate(exchange=args.exchange)
 
     # 建立交易所
     exchange = _build_exchange(args.exchange)
 
-    # 建立倉位計算器（fixed_qty 模式時仍建立，用於顯示清算資訊）
+    # 自動查詢數量精度（未手動指定時）
+    qty_precision = args.qty_precision
+    if qty_precision is None:
+        qty_precision = exchange.get_qty_precision(args.symbol)
+        logging.getLogger(__name__).info(
+            f"自動偵測 {args.symbol} 數量精度: {qty_precision} 位小數"
+        )
+
+    # 建立倉位計算器
     sizer = PositionSizer(
         leverage=args.leverage,
-        risk_pct=args.risk_pct / 100.0,   # 轉為小數
-        qty_precision=args.qty_precision,
+        risk_pct=args.risk_pct / 100.0,
+        qty_precision=qty_precision,
     )
 
     # 啟動服務

@@ -48,3 +48,7 @@ class BaseExchange(ABC):
     @abstractmethod
     def get_klines(self, symbol: str, interval: str, limit: int = 250) -> list[dict[str, Any]]:
         """取得 K 線資料（由舊到新），每筆至少包含 time, open, high, low, close, volume"""
+
+    @abstractmethod
+    def get_qty_precision(self, symbol: str) -> int:
+        """回傳該交易對的數量小數位數（例如 BTC=3, ETH=2, SOL=1）"""
