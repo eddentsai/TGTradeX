@@ -81,7 +81,7 @@ class ServiceRunner:
         self._sizer     = sizer
         self._fixed_qty = fixed_qty
         self._dry_run   = dry_run
-        self._sleep_sec = _INTERVAL_SECONDS.get(interval, 900)
+        self._interval_sec = _INTERVAL_SECONDS.get(interval, 900)
 
         self._active_pos: ActivePosition | None = None
 
@@ -114,8 +114,24 @@ class ServiceRunner:
                 break
             except Exception as e:
                 logger.exception(f"週期執行錯誤（非暫時性，跳過本週期）: {e}")
-            logger.debug(f"睡眠 {self._sleep_sec} 秒，等待下一根 K 線")
-            time.sleep(self._sleep_sec)
+            self._sleep_until_next_candle()
+
+    # ── 等待下一根 K 線 ───────────────────────────────────────────────────────
+
+    def _sleep_until_next_candle(self, offset_sec: int = 5) -> None:
+        """
+        睡眠到下一個 K 線整點邊界後 offset_sec 秒。
+        例如 1h 週期在 00:59:57 呼叫，會睡到 01:00:05。
+        """
+        now           = time.time()
+        next_boundary = (int(now) // self._interval_sec + 1) * self._interval_sec
+        sleep_sec     = next_boundary + offset_sec - now
+        wake_time     = time.strftime("%H:%M:%S", time.localtime(next_boundary + offset_sec))
+        logger.debug(
+            f"等待下一根 {self._interval} K 線，"
+            f"睡眠 {sleep_sec:.1f}s（預計 {wake_time} 喚醒）"
+        )
+        time.sleep(max(sleep_sec, 1))
 
     # ── 暫時性錯誤重試 ────────────────────────────────────────────────────────
 
