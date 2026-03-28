@@ -171,10 +171,12 @@ class ServiceRunner:
         active_pos = self._reconcile_position(positions, snap)
 
         # 5. 策略切換保護（開倉策略 ≠ 當前策略時，依盈虧分流）
-        strategy   = self._strategies[state]
-        active_pos = self._handle_strategy_switch(snap, active_pos, strategy.name)
-        if active_pos is None and self._active_pos is None:
-            # 剛被平倉，本週期不再做其他動作
+        strategy      = self._strategies[state]
+        had_position  = active_pos is not None
+        active_pos    = self._handle_strategy_switch(snap, active_pos, strategy.name)
+        just_closed   = had_position and active_pos is None and self._active_pos is None
+        if just_closed:
+            # 剛被策略切換平倉，本週期不再嘗試開新倉
             return
 
         # 6. 選策略 → 產生信號
