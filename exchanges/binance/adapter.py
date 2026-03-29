@@ -12,8 +12,13 @@ Binance 期貨與 Bitunix 的主要差異：
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+import time
 from typing import Any
+from urllib.parse import urlencode
 
+import requests as _requests
 from binance_common.configuration import ConfigurationRestAPI
 from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (
     DerivativesTradingUsdsFutures,
@@ -30,17 +35,35 @@ class BinanceExchange(BaseExchange):
     """BaseExchange 的 Binance USDS-M Futures 實作"""
 
     def __init__(self, api_key: str, secret_key: str, testnet: bool = False) -> None:
-        base_path = (
+        self._base_path = (
             "https://testnet.binancefuture.com"
             if testnet
             else "https://fapi.binance.com"
         )
+        self._api_key    = api_key
+        self._secret_key = secret_key
         config = ConfigurationRestAPI(
             api_key=api_key,
             api_secret=secret_key,
-            base_path=base_path,
+            base_path=self._base_path,
         )
         self._client = DerivativesTradingUsdsFutures(config_rest_api=config)
+
+    def _signed_request(self, method: str, path: str, params: dict) -> dict:
+        """直接送簽名 REST 請求（用於 SDK 不支援的參數）"""
+        params["timestamp"] = int(time.time() * 1000)
+        query = urlencode(params)
+        sig   = hmac.new(
+            self._secret_key.encode(), query.encode(), hashlib.sha256
+        ).hexdigest()
+        url  = f"{self._base_path}{path}?{query}&signature={sig}"
+        resp = _requests.request(
+            method, url,
+            headers={"X-MBX-APIKEY": self._api_key},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     @property
     def name(self) -> str:
@@ -148,23 +171,23 @@ class BinanceExchange(BaseExchange):
 
         # ── 開倉後掛交易所 SL/TP 條件單 ──────────────────────────────────────
         if trade_side == "OPEN":
-            close_side = NewOrderSideEnum("SELL" if payload["side"] == "BUY" else "BUY")
+            close_side = "SELL" if payload["side"] == "BUY" else "BUY"
             sl_price   = payload.get("slPrice")
             tp_price   = payload.get("tpPrice")
             if sl_price:
-                self._client.rest_api.new_order(
-                    symbol=symbol, side=close_side,
-                    type="STOP_MARKET",
-                    stop_price=float(sl_price),
-                    close_position="true",
-                )
+                self._signed_request("POST", "/fapi/v1/order", {
+                    "symbol": symbol, "side": close_side,
+                    "type": "STOP_MARKET",
+                    "stopPrice": float(sl_price),
+                    "closePosition": "true",
+                })
             if tp_price:
-                self._client.rest_api.new_order(
-                    symbol=symbol, side=close_side,
-                    type="TAKE_PROFIT_MARKET",
-                    stop_price=float(tp_price),
-                    close_position="true",
-                )
+                self._signed_request("POST", "/fapi/v1/order", {
+                    "symbol": symbol, "side": close_side,
+                    "type": "TAKE_PROFIT_MARKET",
+                    "stopPrice": float(tp_price),
+                    "closePosition": "true",
+                })
 
         return result
 
@@ -193,19 +216,19 @@ class BinanceExchange(BaseExchange):
         tp_price: float,
     ) -> None:
         """補掛 SL/TP 條件單（平倉方向與倉位方向相反）"""
-        close_side = NewOrderSideEnum("SELL" if side == "BUY" else "BUY")
-        self._client.rest_api.new_order(
-            symbol=symbol, side=close_side,
-            type="STOP_MARKET",
-            stop_price=sl_price,
-            close_position="true",
-        )
-        self._client.rest_api.new_order(
-            symbol=symbol, side=close_side,
-            type="TAKE_PROFIT_MARKET",
-            stop_price=tp_price,
-            close_position="true",
-        )
+        close_side = "SELL" if side == "BUY" else "BUY"
+        self._signed_request("POST", "/fapi/v1/order", {
+            "symbol": symbol, "side": close_side,
+            "type": "STOP_MARKET",
+            "stopPrice": sl_price,
+            "closePosition": "true",
+        })
+        self._signed_request("POST", "/fapi/v1/order", {
+            "symbol": symbol, "side": close_side,
+            "type": "TAKE_PROFIT_MARKET",
+            "stopPrice": tp_price,
+            "closePosition": "true",
+        })
 
     # ── 市場資料 ──────────────────────────────────────────────────────────────
 
