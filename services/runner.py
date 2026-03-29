@@ -403,7 +403,7 @@ class ServiceRunner:
                 return None, None
 
             account = self._exchange.get_account()
-            balance = float(account.get("available", 0))
+            balance = float(account.get("available") or 0)
             if balance <= 0:
                 logger.error(f"帳戶可用餘額為 0 或無法取得: {account}")
                 return None, None

@@ -3,6 +3,7 @@
 
 從環境變數讀取所有設定，支援 .env 檔案（需安裝 python-dotenv）。
 """
+
 from __future__ import annotations
 
 import os
@@ -11,6 +12,7 @@ import os
 def _load_dotenv() -> None:
     try:
         from dotenv import load_dotenv
+
         load_dotenv()
     except ImportError:
         pass
@@ -32,8 +34,8 @@ BINANCE_SECRET_KEY: str = os.environ.get("BINANCE_SECRET_KEY", "")
 
 
 _EXCHANGE_KEYS: dict[str, tuple[str, str]] = {
-    "bitunix": ("BITUNIX_API_KEY",    "BITUNIX_SECRET_KEY"),
-    "binance": ("BINANCE_API_KEY",    "BINANCE_SECRET_KEY"),
+    "bitunix": ("BITUNIX_API_KEY", "BITUNIX_SECRET_KEY"),
+    "binance": ("BINANCE_API_KEY", "BINANCE_SECRET_KEY"),
 }
 
 

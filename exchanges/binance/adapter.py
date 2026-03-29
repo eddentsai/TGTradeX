@@ -12,8 +12,10 @@ Binance 期貨與 Bitunix 的主要差異：
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
+import requests as _requests
 from binance_common.configuration import ConfigurationRestAPI
 from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (
     DerivativesTradingUsdsFutures,
@@ -39,6 +41,7 @@ class BinanceExchange(BaseExchange):
             api_key=api_key,
             api_secret=secret_key,
             base_path=base_path,
+            time_offset=_server_time_offset(base_path),
         )
         self._client = DerivativesTradingUsdsFutures(config_rest_api=config)
 
@@ -57,7 +60,7 @@ class BinanceExchange(BaseExchange):
         resp = self._client.rest_api.account_information_v3()
         data = resp.data() if callable(resp.data) else resp.data
         return {
-            "available":     getattr(data, "total_available_balance", None),
+            "available":     getattr(data, "available_balance", None),
             "unrealizedPnl": getattr(data, "total_unrealized_profit", None),
             "_raw": data,
         }
@@ -211,6 +214,22 @@ class BinanceExchange(BaseExchange):
 
 
 # ── 內部輔助 ──────────────────────────────────────────────────────────────────
+
+def _server_time_offset(base_path: str) -> int:
+    """
+    取得本機與 Binance 伺服器的時間差（毫秒）。
+    伺服器時間 - 本機時間，傳給 ConfigurationRestAPI(time_offset=...) 使用。
+    若請求失敗則回傳 0（不修正）。
+    """
+    try:
+        resp        = _requests.get(f"{base_path}/fapi/v1/time", timeout=5)
+        server_ms   = resp.json()["serverTime"]
+        local_ms    = int(time.time() * 1000)
+        offset      = server_ms - local_ms
+        return offset
+    except Exception:
+        return 0
+
 
 def _map_effect(effect: str) -> str:
     """將 Bitunix 的 effect 字串對應到 Binance 的 timeInForce"""
