@@ -13,6 +13,7 @@ from exchanges.base import BaseExchange
 from services.indicators import IndicatorSnapshot, candles_from_raw, compute_indicators
 from services.market_state import MarketState, STATE_LABELS, classify_market
 from services.position_sizer import PositionSizer, SizeResult
+from services.position_store import delete as pos_delete, load as pos_load, save as pos_save
 from services.strategies.base import ActivePosition, BaseStrategy, Signal
 from services.strategies.conservative import ConservativeStrategy
 from services.strategies.trend_following import TrendFollowingStrategy
@@ -295,24 +296,59 @@ class ServiceRunner:
             return None
 
         if self._active_pos is None:
-            # 服務重啟後發現有倉位：保守重建
-            entry = float(pos_dict.get("openPrice", snap.close))
-            self._active_pos = ActivePosition(
-                position_id=pos_dict.get("positionId", ""),
-                side=pos_dict.get("side", "BUY"),
-                entry_price=entry,
-                qty=str(pos_dict.get("qty", self._fixed_qty or "0")),
-                stop_loss=entry * 0.95,
-                take_profit=entry * 1.05,
-                strategy_name="recovered",
-            )
-            logger.warning(
-                f"[{self._symbol}] 發現未追蹤倉位，已重建（保守 SL/TP）"
-                f" positionId={self._active_pos.position_id}"
-            )
+            # 服務重啟後發現有倉位：優先讀本地快取（保留原始 SL/TP）
+            cached = pos_load(self._exchange.name, self._symbol)
+            position_id = pos_dict.get("positionId", "")
+
+            if cached is not None:
+                # 快取存在：還原完整倉位狀態，僅更新 position_id
+                cached.position_id = position_id or cached.position_id
+                self._active_pos = cached
+                logger.warning(
+                    f"[{self._symbol}] 服務重啟，從快取還原倉位"
+                    f" strategy={cached.strategy_name}"
+                    f" entry={cached.entry_price:.4f}"
+                    f" SL={cached.stop_loss:.4f} TP={cached.take_profit:.4f}"
+                )
+            else:
+                # 無快取：只能用保守 5% 重建
+                entry    = float(pos_dict.get("openPrice", snap.close))
+                side     = pos_dict.get("side", "BUY")
+                qty      = str(pos_dict.get("qty", self._fixed_qty or "0"))
+                sl_price = entry * (0.95 if side == "BUY" else 1.05)
+                tp_price = entry * (1.05 if side == "BUY" else 0.95)
+                self._active_pos = ActivePosition(
+                    position_id=position_id,
+                    side=side,
+                    entry_price=entry,
+                    qty=qty,
+                    stop_loss=sl_price,
+                    take_profit=tp_price,
+                    strategy_name="recovered",
+                )
+                logger.warning(
+                    f"[{self._symbol}] 發現未追蹤倉位（無快取），以保守 5% 重建"
+                    f" entry={entry:.4f} SL={sl_price:.4f} TP={tp_price:.4f}"
+                )
+
+            # 補掛交易所條件單（快取或保守均需補掛）
+            try:
+                self._exchange.cancel_all_orders(self._symbol)
+                self._exchange.place_sl_tp_orders(
+                    symbol=self._symbol,
+                    side=self._active_pos.side,
+                    qty=self._active_pos.qty,
+                    sl_price=self._active_pos.stop_loss,
+                    tp_price=self._active_pos.take_profit,
+                )
+                logger.info(f"[{self._symbol}] 已補掛交易所 SL/TP 條件單")
+            except Exception as e:
+                logger.error(f"[{self._symbol}] 補掛 SL/TP 失敗，倉位暫無保護: {e}")
         else:
             if not self._active_pos.position_id:
                 self._active_pos.position_id = pos_dict.get("positionId", "")
+                if self._active_pos.position_id:
+                    pos_save(self._exchange.name, self._symbol, self._active_pos)  # 補存 position_id
 
         return self._active_pos
 
@@ -358,6 +394,17 @@ class ServiceRunner:
             payload["price"]  = signal.price
             payload["effect"] = "GTC"
 
+        # 交易所層面的 SL/TP 保護單（閃崩時不依賴本服務輪詢）
+        entry = snap.close
+        sl    = signal.stop_loss  or (size_result.liquidation_price * 1.05 if size_result else entry * 0.95)
+        tp    = signal.take_profit or entry * 1.05
+        payload["slPrice"]    = str(round(sl, 8))
+        payload["slStopType"] = "MARK_PRICE"
+        payload["slOrderType"] = "MARKET"
+        payload["tpPrice"]    = str(round(tp, 8))
+        payload["tpStopType"] = "MARK_PRICE"
+        payload["tpOrderType"] = "MARKET"
+
         if self._dry_run:
             logger.info(
                 f"[DRY-RUN] 開倉 {payload}  "
@@ -369,10 +416,6 @@ class ServiceRunner:
         result = self._exchange.place_order(payload)
         logger.info(f"[{self._symbol}] 開倉送出 orderId={result.get('orderId')}")
 
-        entry  = snap.close
-        sl     = signal.stop_loss  or (size_result.liquidation_price * 1.05 if size_result else entry * 0.95)
-        tp     = signal.take_profit or entry * 1.05
-
         self._active_pos = ActivePosition(
             position_id="",
             side=side,
@@ -381,7 +424,10 @@ class ServiceRunner:
             stop_loss=sl,
             take_profit=tp,
             strategy_name=strategy_name,
+            exchange=self._exchange.name,
+            interval=self._interval,
         )
+        pos_save(self._exchange.name, self._symbol, self._active_pos)
         logger.info(
             f"[{self._symbol}] 倉位建立 side={side} entry={entry:.4f} "
             f"SL={sl:.4f} TP={tp:.4f} qty={qty}"
@@ -438,6 +484,12 @@ class ServiceRunner:
                 logger.error(f"[{self._symbol}] 無法取得 positionId，跳過平倉")
                 return
 
+        # 先取消所有掛單（SL/TP 條件單），避免平倉後條件單仍在觸發
+        try:
+            self._exchange.cancel_all_orders(self._symbol)
+        except Exception as e:
+            logger.warning(f"[{self._symbol}] 取消掛單失敗（繼續平倉）: {e}")
+
         close_side = "SELL" if active_pos.side == "BUY" else "BUY"
         payload = {
             "symbol":     self._symbol,
@@ -458,3 +510,4 @@ class ServiceRunner:
             f"理由={signal.reason}"
         )
         self._active_pos = None
+        pos_delete(self._exchange.name, self._symbol)

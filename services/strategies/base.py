@@ -19,6 +19,8 @@ class ActivePosition:
     stop_loss: float
     take_profit: float
     strategy_name: str = ""
+    exchange: str = ""        # 交易所名稱，例如 "bitunix" | "binance"
+    interval: str = ""        # K 線週期，例如 "15m" | "1h"
 
 
 @dataclass

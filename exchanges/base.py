@@ -43,6 +43,21 @@ class BaseExchange(ABC):
     def cancel_order(self, order_id: str, symbol: str) -> dict[str, Any]:
         """取消訂單"""
 
+    @abstractmethod
+    def cancel_all_orders(self, symbol: str) -> None:
+        """取消該交易對所有掛單（平倉前呼叫，清除 SL/TP 條件單）"""
+
+    @abstractmethod
+    def place_sl_tp_orders(
+        self,
+        symbol: str,
+        side: str,       # 倉位方向 "BUY" | "SELL"
+        qty: str,
+        sl_price: float,
+        tp_price: float,
+    ) -> None:
+        """對現有倉位補掛交易所層面的 SL/TP 條件單（服務重啟後保護未追蹤倉位用）"""
+
     # ── 市場資料 ──────────────────────────────────────────────────────────────
 
     @abstractmethod

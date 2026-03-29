@@ -138,13 +138,35 @@ class BinanceExchange(BaseExchange):
 
         resp   = self._client.rest_api.new_order(**kwargs)
         data   = resp.data() if callable(resp.data) else resp.data
-        return {
+        result = {
             "orderId": str(getattr(data, "order_id", "") or ""),
             "symbol":  str(getattr(data, "symbol", "") or ""),
             "side":    str(getattr(data, "side", "") or ""),
             "status":  str(getattr(data, "status", "") or ""),
             "_raw":    data,
         }
+
+        # ── 開倉後掛交易所 SL/TP 條件單 ──────────────────────────────────────
+        if trade_side == "OPEN":
+            close_side = NewOrderSideEnum("SELL" if payload["side"] == "BUY" else "BUY")
+            sl_price   = payload.get("slPrice")
+            tp_price   = payload.get("tpPrice")
+            if sl_price:
+                self._client.rest_api.new_order(
+                    symbol=symbol, side=close_side,
+                    type="STOP_MARKET",
+                    stop_price=float(sl_price),
+                    close_position="true",
+                )
+            if tp_price:
+                self._client.rest_api.new_order(
+                    symbol=symbol, side=close_side,
+                    type="TAKE_PROFIT_MARKET",
+                    stop_price=float(tp_price),
+                    close_position="true",
+                )
+
+        return result
 
     def cancel_order(self, order_id: str, symbol: str) -> dict[str, Any]:
         resp = self._client.rest_api.cancel_order(
@@ -157,6 +179,33 @@ class BinanceExchange(BaseExchange):
             "status":  str(getattr(data, "status", "") or ""),
             "_raw":    data,
         }
+
+    def cancel_all_orders(self, symbol: str) -> None:
+        """取消該交易對所有掛單（含 STOP_MARKET / TAKE_PROFIT_MARKET 條件單）"""
+        self._client.rest_api.cancel_all_open_orders(symbol=symbol)
+
+    def place_sl_tp_orders(
+        self,
+        symbol: str,
+        side: str,
+        qty: str,
+        sl_price: float,
+        tp_price: float,
+    ) -> None:
+        """補掛 SL/TP 條件單（平倉方向與倉位方向相反）"""
+        close_side = NewOrderSideEnum("SELL" if side == "BUY" else "BUY")
+        self._client.rest_api.new_order(
+            symbol=symbol, side=close_side,
+            type="STOP_MARKET",
+            stop_price=sl_price,
+            close_position="true",
+        )
+        self._client.rest_api.new_order(
+            symbol=symbol, side=close_side,
+            type="TAKE_PROFIT_MARKET",
+            stop_price=tp_price,
+            close_position="true",
+        )
 
     # ── 市場資料 ──────────────────────────────────────────────────────────────
 

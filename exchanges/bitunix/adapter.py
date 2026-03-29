@@ -48,6 +48,54 @@ class BitunixExchange(BaseExchange):
             symbol=symbol, order_list=[{"orderId": order_id}]
         )
 
+    def place_sl_tp_orders(
+        self,
+        symbol: str,
+        side: str,
+        qty: str,
+        sl_price: float,
+        tp_price: float,
+    ) -> None:
+        """補掛 SL/TP 條件單（平倉方向與倉位方向相反）"""
+        if self._client.futures_private is None:
+            raise RuntimeError("未設定 Bitunix credentials")
+        close_side = "BUY" if side == "SELL" else "SELL"
+        # 止損單
+        self._client.futures_private.place_order({
+            "symbol":    symbol,
+            "side":      close_side,
+            "orderType": "MARKET",
+            "qty":       qty,
+            "tradeSide": "CLOSE",
+            "slPrice":    str(round(sl_price, 8)),
+            "slStopType": "MARK_PRICE",
+            "slOrderType": "MARKET",
+        })
+        # 止盈單
+        self._client.futures_private.place_order({
+            "symbol":    symbol,
+            "side":      close_side,
+            "orderType": "MARKET",
+            "qty":       qty,
+            "tradeSide": "CLOSE",
+            "tpPrice":    str(round(tp_price, 8)),
+            "tpStopType": "MARK_PRICE",
+            "tpOrderType": "MARKET",
+        })
+
+    def cancel_all_orders(self, symbol: str) -> None:
+        """取消該交易對所有掛單（含 SL/TP 條件單）"""
+        if self._client.futures_private is None:
+            raise RuntimeError("未設定 Bitunix credentials")
+        orders = self._client.futures_private.get_pending_orders(symbol=symbol)
+        if not orders:
+            return
+        order_list = [{"orderId": o["orderId"]} for o in orders if o.get("orderId")]
+        if order_list:
+            self._client.futures_private.cancel_orders(
+                symbol=symbol, order_list=order_list
+            )
+
     def get_klines(self, symbol: str, interval: str, limit: int = 250) -> list[dict[str, Any]]:
         """
         回傳由舊到新的 K 線列表。
