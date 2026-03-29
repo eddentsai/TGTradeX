@@ -171,21 +171,22 @@ class BinanceExchange(BaseExchange):
 
         # ── 開倉後掛交易所 SL/TP 條件單 ──────────────────────────────────────
         if trade_side == "OPEN":
-            close_side = "SELL" if payload["side"] == "BUY" else "BUY"
-            sl_price   = payload.get("slPrice")
-            tp_price   = payload.get("tpPrice")
+            close_side  = "SELL" if payload["side"] == "BUY" else "BUY"
+            price_prec  = self.get_price_precision(symbol)
+            sl_price    = payload.get("slPrice")
+            tp_price    = payload.get("tpPrice")
             if sl_price:
                 self._signed_request("POST", "/fapi/v1/order", {
                     "symbol": symbol, "side": close_side,
                     "type": "STOP_MARKET",
-                    "stopPrice": float(sl_price),
+                    "stopPrice": round(float(sl_price), price_prec),
                     "closePosition": "true",
                 })
             if tp_price:
                 self._signed_request("POST", "/fapi/v1/order", {
                     "symbol": symbol, "side": close_side,
                     "type": "TAKE_PROFIT_MARKET",
-                    "stopPrice": float(tp_price),
+                    "stopPrice": round(float(tp_price), price_prec),
                     "closePosition": "true",
                 })
 
@@ -216,17 +217,20 @@ class BinanceExchange(BaseExchange):
         tp_price: float,
     ) -> None:
         """補掛 SL/TP 條件單（平倉方向與倉位方向相反）"""
-        close_side = "SELL" if side == "BUY" else "BUY"
+        close_side  = "SELL" if side == "BUY" else "BUY"
+        price_prec  = self.get_price_precision(symbol)
+        sl_rounded  = round(sl_price, price_prec)
+        tp_rounded  = round(tp_price, price_prec)
         self._signed_request("POST", "/fapi/v1/order", {
             "symbol": symbol, "side": close_side,
             "type": "STOP_MARKET",
-            "stopPrice": sl_price,
+            "stopPrice": sl_rounded,
             "closePosition": "true",
         })
         self._signed_request("POST", "/fapi/v1/order", {
             "symbol": symbol, "side": close_side,
             "type": "TAKE_PROFIT_MARKET",
-            "stopPrice": tp_price,
+            "stopPrice": tp_rounded,
             "closePosition": "true",
         })
 
@@ -280,6 +284,15 @@ class BinanceExchange(BaseExchange):
             if getattr(s, "symbol", "") == symbol:
                 return int(getattr(s, "quantity_precision", 3))
         raise ValueError(f"找不到交易對: {symbol}")
+
+    def get_price_precision(self, symbol: str) -> int:
+        """從 Binance 合約規格取得價格精度（price_precision 欄位）"""
+        resp = self._client.rest_api.exchange_information()
+        data = resp.data() if callable(resp.data) else resp.data
+        for s in getattr(data, "symbols", []):
+            if getattr(s, "symbol", "") == symbol:
+                return int(getattr(s, "price_precision", 2))
+        return 2  # 預設 2 位小數
 
 
 # ── 內部輔助 ──────────────────────────────────────────────────────────────────
