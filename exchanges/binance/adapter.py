@@ -325,6 +325,31 @@ class BinanceExchange(BaseExchange):
                 return int(getattr(s, "price_precision", 2))
         return 2  # 預設 2 位小數
 
+    def get_tickers(self) -> list[dict]:
+        """
+        取得 Binance 所有 USDS-M 合約 ticker，正規化為 BaseExchange 標準格式。
+        使用 /fapi/v1/ticker/24hr（不需簽名）。
+        """
+        url  = f"{self._base_path}/fapi/v1/ticker/24hr"
+        resp = _requests.get(url, timeout=10)
+        if not resp.ok:
+            raise RuntimeError(f"Binance tickers {resp.status_code}: {resp.text}")
+        raw    = resp.json()
+        result = []
+        for t in raw:
+            try:
+                result.append({
+                    "symbol":     str(t.get("symbol", "")),
+                    "last_price": float(t.get("lastPrice", 0) or 0),
+                    "quote_vol":  float(t.get("quoteVolume", 0) or 0),
+                    "base_vol":   float(t.get("volume", 0) or 0),
+                    "high":       float(t.get("highPrice", 0) or 0),
+                    "low":        float(t.get("lowPrice", 0) or 0),
+                })
+            except (TypeError, ValueError):
+                continue
+        return result
+
 
 # ── 內部輔助 ──────────────────────────────────────────────────────────────────
 

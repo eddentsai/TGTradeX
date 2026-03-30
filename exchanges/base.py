@@ -67,3 +67,17 @@ class BaseExchange(ABC):
     @abstractmethod
     def get_qty_precision(self, symbol: str) -> int:
         """回傳該交易對的數量小數位數（例如 BTC=3, ETH=2, SOL=1）"""
+
+    @abstractmethod
+    def get_tickers(self) -> list[dict]:
+        """
+        取得所有合約的行情摘要，用於自動幣種掃描。
+
+        每筆至少包含以下欄位（由子類正規化）：
+          symbol     : str   交易對名稱，例如 "BTCUSDT"
+          last_price : float 最新成交價
+          quote_vol  : float 24h 計價貨幣成交量（USDT）
+          base_vol   : float 24h 標的資產成交量
+          high       : float 24h 最高價
+          low        : float 24h 最低價
+        """

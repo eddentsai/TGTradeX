@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 from exchanges.base import BaseExchange
@@ -94,6 +95,7 @@ class ServiceRunner:
         self._interval_sec = _INTERVAL_SECONDS.get(interval, 900)
 
         self._active_pos: ActivePosition | None = None
+        self._stop_event = threading.Event()
 
         self._strategies: dict[MarketState, BaseStrategy] = {
             MarketState.UPTREND:          TrendFollowingStrategy(),
@@ -101,6 +103,10 @@ class ServiceRunner:
             MarketState.RANGING:          VolumeProfileStrategy(),
             MarketState.HIGH_VOLATILITY:  ConservativeStrategy(),
         }
+
+    def stop(self) -> None:
+        """通知主迴圈在下一個週期結束後停止（執行緒安全）"""
+        self._stop_event.set()
 
     # ── 主迴圈 ────────────────────────────────────────────────────────────────
 
@@ -116,7 +122,7 @@ class ServiceRunner:
             f"exchange={self._exchange.name} symbol={self._symbol} "
             f"interval={self._interval} {qty_desc}"
         )
-        while True:
+        while not self._stop_event.is_set():
             try:
                 self._run_cycle_with_retry()
             except KeyboardInterrupt:
@@ -124,7 +130,9 @@ class ServiceRunner:
                 break
             except Exception as e:
                 logger.exception(f"週期執行錯誤（非暫時性，跳過本週期）: {e}")
-            self._sleep_until_next_candle()
+            if not self._stop_event.is_set():
+                self._sleep_until_next_candle()
+        logger.info(f"[{self._symbol}] 服務已停止")
 
     # ── 等待下一根 K 線 ───────────────────────────────────────────────────────
 

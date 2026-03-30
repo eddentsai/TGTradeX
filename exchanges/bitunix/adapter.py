@@ -116,3 +116,21 @@ class BitunixExchange(BaseExchange):
         if not pairs:
             raise ValueError(f"找不到交易對: {symbol}")
         return int(pairs[0].get("basePrecision", 3))
+
+    def get_tickers(self) -> list[dict]:
+        """取得所有合約 ticker，正規化為 BaseExchange 標準格式"""
+        raw = self._client.futures_public.get_tickers()
+        result = []
+        for t in raw:
+            try:
+                result.append({
+                    "symbol":     str(t.get("symbol", "")),
+                    "last_price": float(t.get("lastPrice", 0) or 0),
+                    "quote_vol":  float(t.get("quoteVol", 0) or 0),
+                    "base_vol":   float(t.get("baseVol", 0) or 0),
+                    "high":       float(t.get("high", 0) or 0),
+                    "low":        float(t.get("low", 0) or 0),
+                })
+            except (TypeError, ValueError):
+                continue
+        return result
