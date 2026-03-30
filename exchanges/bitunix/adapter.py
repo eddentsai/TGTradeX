@@ -71,16 +71,16 @@ class BitunixExchange(BaseExchange):
             "slStopType": "MARK_PRICE",
             "slOrderType": "MARKET",
         })
-        # 止盈單
+        # 止盈單（限價，maker 手續費）
         self._client.futures_private.place_order({
-            "symbol":    symbol,
-            "side":      close_side,
-            "orderType": "MARKET",
-            "qty":       qty,
-            "tradeSide": "CLOSE",
-            "tpPrice":    str(round(tp_price, 8)),
-            "tpStopType": "MARK_PRICE",
-            "tpOrderType": "MARKET",
+            "symbol":      symbol,
+            "side":        close_side,
+            "orderType":   "LIMIT",
+            "qty":         qty,
+            "price":       str(round(tp_price, 8)),
+            "effect":      "GTC",
+            "tradeSide":   "CLOSE",
+            "reduceOnly":  True,
         })
 
     def cancel_all_orders(self, symbol: str) -> None:

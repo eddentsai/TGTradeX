@@ -401,9 +401,10 @@ class ServiceRunner:
         payload["slPrice"]    = str(round(sl, 8))
         payload["slStopType"] = "MARK_PRICE"
         payload["slOrderType"] = "MARKET"
-        payload["tpPrice"]    = str(round(tp, 8))
-        payload["tpStopType"] = "MARK_PRICE"
-        payload["tpOrderType"] = "MARKET"
+        payload["tpPrice"]     = str(round(tp, 8))
+        payload["tpStopType"]  = "MARK_PRICE"
+        payload["tpOrderType"] = "LIMIT"
+        payload["tpOrderPrice"] = str(round(tp, 8))
 
         if self._dry_run:
             logger.info(

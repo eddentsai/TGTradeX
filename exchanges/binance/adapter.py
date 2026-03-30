@@ -25,6 +25,8 @@ from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futur
 )
 from binance_sdk_derivatives_trading_usds_futures.rest_api.models.enums import (
     KlineCandlestickDataIntervalEnum,
+    NewAlgoOrderSideEnum,
+    NewAlgoOrderWorkingTypeEnum,
     NewOrderSideEnum,
 )
 
@@ -62,7 +64,10 @@ class BinanceExchange(BaseExchange):
             headers={"X-MBX-APIKEY": self._api_key},
             timeout=10,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            raise RuntimeError(
+                f"Binance API {resp.status_code}: {resp.text}"
+            )
         return resp.json()
 
     @property
@@ -171,24 +176,30 @@ class BinanceExchange(BaseExchange):
 
         # ── 開倉後掛交易所 SL/TP 條件單 ──────────────────────────────────────
         if trade_side == "OPEN":
-            close_side  = "SELL" if payload["side"] == "BUY" else "BUY"
-            price_prec  = self.get_price_precision(symbol)
-            sl_price    = payload.get("slPrice")
-            tp_price    = payload.get("tpPrice")
+            close_side = NewAlgoOrderSideEnum("SELL" if payload["side"] == "BUY" else "BUY")
+            price_prec = self.get_price_precision(symbol)
+            sl_price   = payload.get("slPrice")
+            tp_price   = payload.get("tpPrice")
             if sl_price:
-                self._signed_request("POST", "/fapi/v1/order", {
-                    "symbol": symbol, "side": close_side,
-                    "type": "STOP_MARKET",
-                    "stopPrice": round(float(sl_price), price_prec),
-                    "closePosition": "true",
-                })
+                self._client.rest_api.new_algo_order(
+                    algo_type="CONDITIONAL",
+                    symbol=symbol,
+                    side=close_side,
+                    type="STOP_MARKET",
+                    trigger_price=round(float(sl_price), price_prec),
+                    working_type=NewAlgoOrderWorkingTypeEnum.MARK_PRICE,
+                    close_position="true",
+                )
             if tp_price:
-                self._signed_request("POST", "/fapi/v1/order", {
-                    "symbol": symbol, "side": close_side,
-                    "type": "TAKE_PROFIT_MARKET",
-                    "stopPrice": round(float(tp_price), price_prec),
-                    "closePosition": "true",
-                })
+                self._client.rest_api.new_order(
+                    symbol=symbol,
+                    side=NewOrderSideEnum("SELL" if payload["side"] == "BUY" else "BUY"),
+                    type="LIMIT",
+                    quantity=qty,
+                    price=round(float(tp_price), price_prec),
+                    time_in_force="GTC",
+                    reduce_only="true",
+                )
 
         return result
 
@@ -205,8 +216,15 @@ class BinanceExchange(BaseExchange):
         }
 
     def cancel_all_orders(self, symbol: str) -> None:
-        """取消該交易對所有掛單（含 STOP_MARKET / TAKE_PROFIT_MARKET 條件單）"""
-        self._client.rest_api.cancel_all_open_orders(symbol=symbol)
+        """取消該交易對所有掛單（含一般掛單與 algo 條件單）"""
+        try:
+            self._client.rest_api.cancel_all_open_orders(symbol=symbol)
+        except Exception:
+            pass
+        try:
+            self._client.rest_api.cancel_all_algo_open_orders(symbol=symbol)
+        except Exception:
+            pass
 
     def place_sl_tp_orders(
         self,
@@ -216,23 +234,36 @@ class BinanceExchange(BaseExchange):
         sl_price: float,
         tp_price: float,
     ) -> None:
-        """補掛 SL/TP 條件單（平倉方向與倉位方向相反）"""
-        close_side  = "SELL" if side == "BUY" else "BUY"
-        price_prec  = self.get_price_precision(symbol)
-        sl_rounded  = round(sl_price, price_prec)
-        tp_rounded  = round(tp_price, price_prec)
-        self._signed_request("POST", "/fapi/v1/order", {
-            "symbol": symbol, "side": close_side,
-            "type": "STOP_MARKET",
-            "stopPrice": sl_rounded,
-            "closePosition": "true",
-        })
-        self._signed_request("POST", "/fapi/v1/order", {
-            "symbol": symbol, "side": close_side,
-            "type": "TAKE_PROFIT_MARKET",
-            "stopPrice": tp_rounded,
-            "closePosition": "true",
-        })
+        """
+        補掛 SL/TP 保護單：
+          SL → algo STOP_MARKET（觸發價，市價平倉）
+          TP → 限價單 reduce_only（掛在止盈價，maker 手續費）
+        """
+        close_side      = NewAlgoOrderSideEnum("SELL" if side == "BUY" else "BUY")
+        close_side_str  = "SELL" if side == "BUY" else "BUY"
+        price_prec      = self.get_price_precision(symbol)
+
+        # 止損：algo STOP_MARKET
+        self._client.rest_api.new_algo_order(
+            algo_type="CONDITIONAL",
+            symbol=symbol,
+            side=close_side,
+            type="STOP_MARKET",
+            trigger_price=round(sl_price, price_prec),
+            working_type=NewAlgoOrderWorkingTypeEnum.MARK_PRICE,
+            close_position="true",
+        )
+
+        # 止盈：限價單 reduce_only（maker 手續費）
+        self._client.rest_api.new_order(
+            symbol=symbol,
+            side=NewOrderSideEnum(close_side_str),
+            type="LIMIT",
+            quantity=float(qty),
+            price=round(tp_price, price_prec),
+            time_in_force="GTC",
+            reduce_only="true",
+        )
 
     # ── 市場資料 ──────────────────────────────────────────────────────────────
 
