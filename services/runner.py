@@ -293,6 +293,11 @@ class ServiceRunner:
             if self._active_pos is not None:
                 logger.info(f"[{self._symbol}] 交易所無倉位，清除本地狀態")
                 self._active_pos = None
+                pos_delete(self._exchange.name, self._symbol)
+            elif pos_load(self._exchange.name, self._symbol) is not None:
+                # 有快取但交易所無倉位：SL/TP 已被觸發，清除殘留快取
+                logger.info(f"[{self._symbol}] 交易所無倉位，清除殘留倉位快取")
+                pos_delete(self._exchange.name, self._symbol)
             return None
 
         if self._active_pos is None:
