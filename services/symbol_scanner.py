@@ -48,6 +48,7 @@ _MAINSTREAM_SYMBOLS: frozenset[str] = frozenset(
         "ATOMUSDT",
         "XAGUSDT",
         "XAUUSDT",
+        "XAUTUSDT",
     }
 )
 
