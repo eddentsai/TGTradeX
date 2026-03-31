@@ -314,14 +314,19 @@ class ServiceRunner:
             position_id = pos_dict.get("positionId", "")
 
             if cached is not None:
-                # 快取存在：還原完整倉位狀態，僅更新 position_id
+                # 快取存在：還原完整倉位狀態
+                # position_id 和 qty 以交易所為準（避免部分平倉後快取過時）
                 cached.position_id = position_id or cached.position_id
+                exchange_qty = pos_dict.get("qty", "")
+                if exchange_qty:
+                    cached.qty = str(exchange_qty)
                 self._active_pos = cached
                 logger.warning(
                     f"[{self._symbol}] 服務重啟，從快取還原倉位"
                     f" strategy={cached.strategy_name}"
                     f" entry={cached.entry_price:.4f}"
                     f" SL={cached.stop_loss:.4f} TP={cached.take_profit:.4f}"
+                    f" qty={cached.qty}"
                 )
             else:
                 # 無快取：只能用保守 5% 重建
