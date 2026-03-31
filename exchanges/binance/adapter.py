@@ -51,6 +51,41 @@ class BinanceExchange(BaseExchange):
         )
         self._client = DerivativesTradingUsdsFutures(config_rest_api=config)
 
+    def _load_symbol_filters(self) -> None:
+        """
+        一次性從 /fapi/v1/exchangeInfo 抓所有 symbol 的
+        tick_size（PRICE_FILTER）與 qty_step（LOT_SIZE），存入快取。
+        """
+        self._tick_cache: dict[str, float] = {}
+        self._qty_precision_cache: dict[str, int] = {}
+        url  = f"{self._base_path}/fapi/v1/exchangeInfo"
+        resp = _requests.get(url, timeout=10)
+        if not resp.ok:
+            return
+        for s in resp.json().get("symbols", []):
+            sym = s.get("symbol", "")
+            self._qty_precision_cache[sym] = int(s.get("quantityPrecision", 3))
+            for f in s.get("filters", []):
+                if f.get("filterType") == "PRICE_FILTER":
+                    self._tick_cache[sym] = float(f.get("tickSize", "0.01"))
+                    break
+
+    def _tick_size(self, symbol: str) -> float:
+        """回傳指定交易對的最小報價單位（tick size），有快取。"""
+        if not hasattr(self, "_tick_cache"):
+            self._load_symbol_filters()
+        return self._tick_cache.get(symbol, 0.01)
+
+    def _align_price(self, price: float, symbol: str) -> float:
+        """將價格對齊到交易所要求的 tick size，避免 -4014 錯誤。"""
+        tick = self._tick_size(symbol)
+        if tick <= 0:
+            return price
+        aligned = round(round(price / tick) * tick, 10)
+        # 去除浮點殘差：只保留 tick 的有效小數位數
+        decimals = len(f"{tick:.10f}".rstrip("0").split(".")[-1])
+        return round(aligned, decimals)
+
     def _signed_request(self, method: str, path: str, params: dict) -> dict:
         """直接送簽名 REST 請求（用於 SDK 不支援的參數）"""
         params["timestamp"] = int(time.time() * 1000)
@@ -177,7 +212,6 @@ class BinanceExchange(BaseExchange):
         # ── 開倉後掛交易所 SL/TP 條件單 ──────────────────────────────────────
         if trade_side == "OPEN":
             close_side = NewAlgoOrderSideEnum("SELL" if payload["side"] == "BUY" else "BUY")
-            price_prec = self.get_price_precision(symbol)
             sl_price   = payload.get("slPrice")
             tp_price   = payload.get("tpPrice")
             if sl_price:
@@ -186,7 +220,7 @@ class BinanceExchange(BaseExchange):
                     symbol=symbol,
                     side=close_side,
                     type="STOP_MARKET",
-                    trigger_price=round(float(sl_price), price_prec),
+                    trigger_price=self._align_price(float(sl_price), symbol),
                     working_type=NewAlgoOrderWorkingTypeEnum.MARK_PRICE,
                     close_position="true",
                 )
@@ -196,7 +230,7 @@ class BinanceExchange(BaseExchange):
                     side=NewOrderSideEnum("SELL" if payload["side"] == "BUY" else "BUY"),
                     type="LIMIT",
                     quantity=qty,
-                    price=round(float(tp_price), price_prec),
+                    price=self._align_price(float(tp_price), symbol),
                     time_in_force="GTC",
                     reduce_only="true",
                 )
@@ -239,9 +273,8 @@ class BinanceExchange(BaseExchange):
           SL → algo STOP_MARKET（觸發價，市價平倉）
           TP → 限價單 reduce_only（掛在止盈價，maker 手續費）
         """
-        close_side      = NewAlgoOrderSideEnum("SELL" if side == "BUY" else "BUY")
-        close_side_str  = "SELL" if side == "BUY" else "BUY"
-        price_prec      = self.get_price_precision(symbol)
+        close_side     = NewAlgoOrderSideEnum("SELL" if side == "BUY" else "BUY")
+        close_side_str = "SELL" if side == "BUY" else "BUY"
 
         # 止損：algo STOP_MARKET
         self._client.rest_api.new_algo_order(
@@ -249,7 +282,7 @@ class BinanceExchange(BaseExchange):
             symbol=symbol,
             side=close_side,
             type="STOP_MARKET",
-            trigger_price=round(sl_price, price_prec),
+            trigger_price=self._align_price(sl_price, symbol),
             working_type=NewAlgoOrderWorkingTypeEnum.MARK_PRICE,
             close_position="true",
         )
@@ -260,7 +293,7 @@ class BinanceExchange(BaseExchange):
             side=NewOrderSideEnum(close_side_str),
             type="LIMIT",
             quantity=float(qty),
-            price=round(tp_price, price_prec),
+            price=self._align_price(tp_price, symbol),
             time_in_force="GTC",
             reduce_only="true",
         )
@@ -308,16 +341,13 @@ class BinanceExchange(BaseExchange):
         return result
 
     def get_qty_precision(self, symbol: str) -> int:
-        """從 Binance 合約規格取得數量精度（quantity_precision 欄位）"""
-        resp = self._client.rest_api.exchange_information()
-        data = resp.data() if callable(resp.data) else resp.data
-        for s in getattr(data, "symbols", []):
-            if getattr(s, "symbol", "") == symbol:
-                return int(getattr(s, "quantity_precision", 3))
-        raise ValueError(f"找不到交易對: {symbol}")
+        """從快取取得數量精度（quantityPrecision 欄位）"""
+        if not hasattr(self, "_qty_precision_cache"):
+            self._load_symbol_filters()
+        return self._qty_precision_cache.get(symbol, 3)
 
     def get_price_precision(self, symbol: str) -> int:
-        """從 Binance 合約規格取得價格精度（price_precision 欄位）"""
+        """從 Binance 合約規格取得價格精度（price_precision 欄位，保留向下相容）"""
         resp = self._client.rest_api.exchange_information()
         data = resp.data() if callable(resp.data) else resp.data
         for s in getattr(data, "symbols", []):
