@@ -39,7 +39,31 @@ class BitunixExchange(BaseExchange):
     def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self._client.futures_private is None:
             raise RuntimeError("未設定 Bitunix credentials")
-        return self._client.futures_private.place_order(payload)
+
+        # 把 runner 傳來的 tpPrice 欄位獨立拆出來，
+        # 不使用條件觸發方式掛止盈，而是開倉後補一筆普通限價減倉單（maker 手續費）
+        tp_price  = payload.pop("tpPrice",      None)
+        payload.pop("tpStopType",  None)
+        payload.pop("tpOrderType", None)
+        payload.pop("tpOrderPrice", None)
+
+        result = self._client.futures_private.place_order(payload)
+
+        # 開倉完成後補掛 TP 限價減倉單
+        if payload.get("tradeSide") == "OPEN" and tp_price is not None:
+            side       = payload["side"]
+            close_side = "BUY" if side == "SELL" else "SELL"
+            self._client.futures_private.place_order({
+                "symbol":     payload["symbol"],
+                "side":       close_side,
+                "orderType":  "LIMIT",
+                "qty":        payload["qty"],
+                "price":      str(tp_price),
+                "effect":     "GTC",
+                "reduceOnly": True,
+            })
+
+        return result
 
     def cancel_order(self, order_id: str, symbol: str) -> dict[str, Any]:
         if self._client.futures_private is None:
@@ -71,16 +95,15 @@ class BitunixExchange(BaseExchange):
             "slStopType": "MARK_PRICE",
             "slOrderType": "MARKET",
         })
-        # 止盈單（限價，maker 手續費）
+        # 止盈單（普通限價減倉，maker 手續費）
         self._client.futures_private.place_order({
-            "symbol":      symbol,
-            "side":        close_side,
-            "orderType":   "LIMIT",
-            "qty":         qty,
-            "price":       str(round(tp_price, 8)),
-            "effect":      "GTC",
-            "tradeSide":   "CLOSE",
-            "reduceOnly":  True,
+            "symbol":     symbol,
+            "side":       close_side,
+            "orderType":  "LIMIT",
+            "qty":        qty,
+            "price":      str(round(tp_price, 8)),
+            "effect":     "GTC",
+            "reduceOnly": True,
         })
 
     def cancel_all_orders(self, symbol: str) -> None:
