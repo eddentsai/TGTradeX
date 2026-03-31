@@ -267,6 +267,7 @@ class BinanceExchange(BaseExchange):
         qty: str,
         sl_price: float,
         tp_price: float,
+        position_id: str = "",
     ) -> None:
         """
         補掛 SL/TP 保護單：

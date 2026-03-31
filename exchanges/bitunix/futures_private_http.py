@@ -31,6 +31,72 @@ class BitunixFuturesPrivateHttpApi:
         self._validate_place_order(order)
         return self._post("/api/v1/futures/trade/place_order", order)
 
+    def place_tpsl_order(
+        self,
+        symbol: str,
+        position_id: str,
+        tp_price: float | None = None,
+        tp_stop_type: str = "MARK_PRICE",
+        tp_order_type: str = "MARKET",
+        tp_order_price: float | None = None,
+        tp_qty: str | None = None,
+        sl_price: float | None = None,
+        sl_stop_type: str = "MARK_PRICE",
+        sl_order_type: str = "MARKET",
+        sl_order_price: float | None = None,
+        sl_qty: str | None = None,
+    ) -> dict:
+        """掛 TP/SL 條件單（專用端點，需要 positionId）"""
+        body: dict[str, Any] = {
+            "symbol":     symbol,
+            "positionId": position_id,
+        }
+        if tp_price is not None:
+            body["tpPrice"]     = str(tp_price)
+            body["tpStopType"]  = tp_stop_type
+            body["tpOrderType"] = tp_order_type
+            if tp_order_type == "LIMIT" and tp_order_price is not None:
+                body["tpOrderPrice"] = str(tp_order_price)
+            if tp_qty is not None:
+                body["tpQty"] = tp_qty
+        if sl_price is not None:
+            body["slPrice"]     = str(sl_price)
+            body["slStopType"]  = sl_stop_type
+            body["slOrderType"] = sl_order_type
+            if sl_order_type == "LIMIT" and sl_order_price is not None:
+                body["slOrderPrice"] = str(sl_order_price)
+            if sl_qty is not None:
+                body["slQty"] = sl_qty
+        return self._post("/api/v1/futures/tpsl/place_order", body)
+
+    def cancel_all_orders(self, symbol: str | None = None) -> dict:
+        """取消所有一般掛單（不含 tpsl 條件單）"""
+        body: dict[str, Any] = {}
+        if symbol:
+            body["symbol"] = symbol
+        return self._post("/api/v1/futures/trade/cancel_all_orders", body)
+
+    def cancel_tpsl_order(self, symbol: str, order_id: str) -> dict:
+        """取消單筆 TP/SL 條件單"""
+        return self._post("/api/v1/futures/tpsl/cancel_order", {
+            "symbol":  symbol,
+            "orderId": order_id,
+        })
+
+    def get_pending_tpsl_orders(
+        self,
+        symbol: str | None = None,
+        position_id: str | None = None,
+    ) -> list[dict]:
+        """查詢未完成的 TP/SL 條件單"""
+        query: dict[str, Any] = {}
+        if symbol:
+            query["symbol"] = symbol
+        if position_id:
+            query["positionId"] = position_id
+        result = self._get("/api/v1/futures/tpsl/get_pending_orders", query)
+        return result if isinstance(result, list) else []
+
     def cancel_orders(self, symbol: str, order_list: list[dict]) -> Any:
         """取消訂單
 

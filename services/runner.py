@@ -353,6 +353,7 @@ class ServiceRunner:
                     qty=self._active_pos.qty,
                     sl_price=self._active_pos.stop_loss,
                     tp_price=self._active_pos.take_profit,
+                    position_id=self._active_pos.position_id,
                 )
                 logger.info(f"[{self._symbol}] 已補掛交易所 SL/TP 條件單")
             except Exception as e:

@@ -85,24 +85,25 @@ class BitunixExchange(BaseExchange):
         qty: str,
         sl_price: float,
         tp_price: float,
+        position_id: str = "",
     ) -> None:
-        """補掛 SL/TP 條件單（平倉方向與倉位方向相反）"""
+        """補掛 SL/TP 保護單（平倉方向與倉位方向相反）"""
         if self._client.futures_private is None:
             raise RuntimeError("未設定 Bitunix credentials")
-        close_side  = "BUY" if side == "SELL" else "SELL"
-        price_prec  = self.get_price_precision(symbol)
-        # 止損：reduceOnly 條件市價單（觸發後市價平倉）
-        self._client.futures_private.place_order({
-            "symbol":      symbol,
-            "side":        close_side,
-            "orderType":   "MARKET",
-            "qty":         qty,
-            "reduceOnly":  True,
-            "slPrice":     str(round(sl_price, price_prec)),
-            "slStopType":  "MARK_PRICE",
-            "slOrderType": "MARKET",
-        })
-        # 止盈：普通限價減倉（maker 手續費）
+        if not position_id:
+            raise ValueError(f"Bitunix place_sl_tp_orders 需要 position_id（symbol={symbol}）")
+        close_side = "BUY" if side == "SELL" else "SELL"
+        price_prec = self.get_price_precision(symbol)
+        # 止損：tpsl 專用端點（條件市價單，觸發後市價平倉）
+        self._client.futures_private.place_tpsl_order(
+            symbol=symbol,
+            position_id=position_id,
+            sl_price=round(sl_price, price_prec),
+            sl_stop_type="MARK_PRICE",
+            sl_order_type="MARKET",
+            sl_qty=qty,
+        )
+        # 止盈：普通限價減倉單（直接進委託簿，maker 手續費）
         self._client.futures_private.place_order({
             "symbol":     symbol,
             "side":       close_side,
@@ -114,17 +115,22 @@ class BitunixExchange(BaseExchange):
         })
 
     def cancel_all_orders(self, symbol: str) -> None:
-        """取消該交易對所有掛單（含 SL/TP 條件單）"""
+        """取消該交易對所有掛單（一般掛單 + tpsl 條件單）"""
         if self._client.futures_private is None:
             raise RuntimeError("未設定 Bitunix credentials")
-        orders = self._client.futures_private.get_pending_orders(symbol=symbol)
-        if not orders:
-            return
-        order_list = [{"orderId": o["orderId"]} for o in orders if o.get("orderId")]
-        if order_list:
-            self._client.futures_private.cancel_orders(
-                symbol=symbol, order_list=order_list
-            )
+        # 一般掛單（批次取消）
+        self._client.futures_private.cancel_all_orders(symbol=symbol)
+        # tpsl 條件單（需逐筆取消）
+        tpsl_orders = self._client.futures_private.get_pending_tpsl_orders(symbol=symbol)
+        for o in tpsl_orders:
+            order_id = o.get("id", "")
+            if order_id:
+                try:
+                    self._client.futures_private.cancel_tpsl_order(
+                        symbol=symbol, order_id=order_id
+                    )
+                except Exception:
+                    pass
 
     def get_klines(self, symbol: str, interval: str, limit: int = 250) -> list[dict[str, Any]]:
         """
