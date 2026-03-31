@@ -8,6 +8,7 @@
   4. 成交量 >= min_quote_vol（24h USDT 成交量）
   5. 按成交量降序排序，回傳前 top_n 名
 """
+
 from __future__ import annotations
 
 import logging
@@ -30,11 +31,25 @@ _LEVERAGED_RE = re.compile(
 )
 
 # 主流幣黑名單（市值前段班，流動性過高導致 volume profile 特徵不明顯）
-_MAINSTREAM_SYMBOLS: frozenset[str] = frozenset({
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
-    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LTCUSDT",
-    "LINKUSDT", "UNIUSDT", "ATOMUSDT",
-})
+_MAINSTREAM_SYMBOLS: frozenset[str] = frozenset(
+    {
+        "BTCUSDT",
+        "ETHUSDT",
+        "BNBUSDT",
+        "SOLUSDT",
+        "XRPUSDT",
+        "ADAUSDT",
+        "DOGEUSDT",
+        "AVAXUSDT",
+        "DOTUSDT",
+        "LTCUSDT",
+        "LINKUSDT",
+        "UNIUSDT",
+        "ATOMUSDT",
+        "XAGUSDT",
+        "XAUUSDT",
+    }
+)
 
 
 def _is_valid_symbol(symbol: str, exclude_mainstream: bool = True) -> bool:
@@ -66,9 +81,9 @@ class SymbolScanner:
         top_n: int = 0,
         exclude_mainstream: bool = True,
     ) -> None:
-        self._exchange          = exchange
-        self._min_quote_vol     = min_quote_vol
-        self._top_n             = top_n
+        self._exchange = exchange
+        self._min_quote_vol = min_quote_vol
+        self._top_n = top_n
         self._exclude_mainstream = exclude_mainstream
 
     def scan(self, held_symbols: set[str] | None = None) -> list[str]:
@@ -104,7 +119,7 @@ class SymbolScanner:
 
         if self._top_n > 0:
             # 先保留已持倉幣種，再從排名前 top_n 補齊
-            top_symbols = [s for s, _ in candidates[:self._top_n]]
+            top_symbols = [s for s, _ in candidates[: self._top_n]]
             for sym in held:
                 if sym not in top_symbols:
                     top_symbols.append(sym)
