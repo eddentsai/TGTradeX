@@ -47,6 +47,12 @@ class BitunixExchange(BaseExchange):
         payload.pop("tpOrderType", None)
         payload.pop("tpOrderPrice", None)
 
+        # SL 欄位對齊交易所價格精度
+        sym        = payload["symbol"]
+        price_prec = self.get_price_precision(sym)
+        if "slPrice" in payload:
+            payload["slPrice"] = str(round(float(payload["slPrice"]), price_prec))
+
         result = self._client.futures_private.place_order(payload)
 
         # 開倉完成後補掛 TP 限價減倉單
@@ -54,11 +60,11 @@ class BitunixExchange(BaseExchange):
             side       = payload["side"]
             close_side = "BUY" if side == "SELL" else "SELL"
             self._client.futures_private.place_order({
-                "symbol":     payload["symbol"],
+                "symbol":     sym,
                 "side":       close_side,
                 "orderType":  "LIMIT",
                 "qty":        payload["qty"],
-                "price":      str(tp_price),
+                "price":      str(round(float(tp_price), price_prec)),
                 "effect":     "GTC",
                 "reduceOnly": True,
             })
@@ -83,25 +89,26 @@ class BitunixExchange(BaseExchange):
         """補掛 SL/TP 條件單（平倉方向與倉位方向相反）"""
         if self._client.futures_private is None:
             raise RuntimeError("未設定 Bitunix credentials")
-        close_side = "BUY" if side == "SELL" else "SELL"
-        # 止損單
+        close_side  = "BUY" if side == "SELL" else "SELL"
+        price_prec  = self.get_price_precision(symbol)
+        # 止損：reduceOnly 條件市價單（觸發後市價平倉）
         self._client.futures_private.place_order({
-            "symbol":    symbol,
-            "side":      close_side,
-            "orderType": "MARKET",
-            "qty":       qty,
-            "tradeSide": "CLOSE",
-            "slPrice":    str(round(sl_price, 8)),
-            "slStopType": "MARK_PRICE",
+            "symbol":      symbol,
+            "side":        close_side,
+            "orderType":   "MARKET",
+            "qty":         qty,
+            "reduceOnly":  True,
+            "slPrice":     str(round(sl_price, price_prec)),
+            "slStopType":  "MARK_PRICE",
             "slOrderType": "MARKET",
         })
-        # 止盈單（普通限價減倉，maker 手續費）
+        # 止盈：普通限價減倉（maker 手續費）
         self._client.futures_private.place_order({
             "symbol":     symbol,
             "side":       close_side,
             "orderType":  "LIMIT",
             "qty":        qty,
-            "price":      str(round(tp_price, 8)),
+            "price":      str(round(tp_price, price_prec)),
             "effect":     "GTC",
             "reduceOnly": True,
         })
@@ -133,12 +140,33 @@ class BitunixExchange(BaseExchange):
                 result = list(reversed(result))
         return result
 
+    def _get_pair_info(self, symbol: str) -> dict:
+        """取得交易對規格，結果快取於 _pair_cache"""
+        if not hasattr(self, "_pair_cache"):
+            self._pair_cache: dict[str, dict] = {}
+        if symbol not in self._pair_cache:
+            pairs = self._client.futures_public.get_trading_pairs(symbol)
+            if not pairs:
+                raise ValueError(f"找不到交易對: {symbol}")
+            self._pair_cache[symbol] = pairs[0]
+        return self._pair_cache[symbol]
+
     def get_qty_precision(self, symbol: str) -> int:
         """從 Bitunix 合約規格取得數量精度（basePrecision 欄位）"""
-        pairs = self._client.futures_public.get_trading_pairs(symbol)
-        if not pairs:
-            raise ValueError(f"找不到交易對: {symbol}")
-        return int(pairs[0].get("basePrecision", 3))
+        return int(self._get_pair_info(symbol).get("basePrecision", 3))
+
+    def get_price_precision(self, symbol: str) -> int:
+        """從 Bitunix 合約規格取得價格精度（quotePrecision / pricePrecision 欄位）"""
+        info = self._get_pair_info(symbol)
+        # Bitunix 欄位名稱依版本不同，依序嘗試
+        for key in ("quotePrecision", "pricePrecision", "priceDecimal"):
+            if key in info:
+                return int(info[key])
+        # fallback：從當前價格的小數位數推算
+        price_str = str(info.get("lastPrice", "") or "")
+        if "." in price_str:
+            return len(price_str.rstrip("0").split(".")[-1])
+        return 4  # 保守預設
 
     def get_tickers(self) -> list[dict]:
         """取得所有合約 ticker，正規化為 BaseExchange 標準格式"""

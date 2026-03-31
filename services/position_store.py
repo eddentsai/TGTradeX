@@ -34,10 +34,10 @@ def save(exchange: str, symbol: str, pos: ActivePosition) -> None:
         "symbol":        symbol,
         "position_id":   pos.position_id,
         "side":          pos.side,
-        "entry_price":   pos.entry_price,
+        "entry_price":   round(pos.entry_price, 8),
         "qty":           pos.qty,
-        "stop_loss":     pos.stop_loss,
-        "take_profit":   pos.take_profit,
+        "stop_loss":     round(pos.stop_loss, 8),
+        "take_profit":   round(pos.take_profit, 8),
         "strategy_name": pos.strategy_name,
         "interval":      pos.interval,
     }
