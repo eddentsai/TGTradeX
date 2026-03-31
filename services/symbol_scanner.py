@@ -4,8 +4,9 @@
 從交易所取得所有合約的 24h ticker，過濾出符合條件的交易對：
   1. 排除穩定幣對（USDC, BUSD, TUSD, DAI, FDUSD 等）
   2. 排除槓桿代幣（UP/DOWN/BULL/BEAR 結尾）
-  3. 成交量 >= min_quote_vol（24h USDT 成交量）
-  4. 按成交量降序排序，回傳前 top_n 名
+  3. 排除主流幣（BTC、ETH 等，成交量高但波動特性不適合此策略）
+  4. 成交量 >= min_quote_vol（24h USDT 成交量）
+  5. 按成交量降序排序，回傳前 top_n 名
 """
 from __future__ import annotations
 
@@ -28,8 +29,15 @@ _LEVERAGED_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 主流幣黑名單（市值前段班，流動性過高導致 volume profile 特徵不明顯）
+_MAINSTREAM_SYMBOLS: frozenset[str] = frozenset({
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LTCUSDT",
+    "LINKUSDT", "UNIUSDT", "ATOMUSDT",
+})
 
-def _is_valid_symbol(symbol: str) -> bool:
+
+def _is_valid_symbol(symbol: str, exclude_mainstream: bool = True) -> bool:
     """True = 這個幣種值得納入掃描候選"""
     if not symbol.endswith("USDT"):
         return False
@@ -37,15 +45,18 @@ def _is_valid_symbol(symbol: str) -> bool:
         return False
     if _LEVERAGED_RE.search(symbol):
         return False
+    if exclude_mainstream and symbol in _MAINSTREAM_SYMBOLS:
+        return False
     return True
 
 
 class SymbolScanner:
     """
     Args:
-        exchange:      已初始化的交易所客戶端
-        min_quote_vol: 24h 最低 USDT 成交量門檻（預設 Binance=5億, Bitunix=1億）
-        top_n:         最多回傳幾個候選幣種（0 = 不限）
+        exchange:           已初始化的交易所客戶端
+        min_quote_vol:      24h 最低 USDT 成交量門檻（預設 Binance=5億, Bitunix=1億）
+        top_n:              最多回傳幾個候選幣種（0 = 不限）
+        exclude_mainstream: 是否排除主流幣（預設 True）
     """
 
     def __init__(
@@ -53,10 +64,12 @@ class SymbolScanner:
         exchange: BaseExchange,
         min_quote_vol: float = 100_000_000,
         top_n: int = 0,
+        exclude_mainstream: bool = True,
     ) -> None:
-        self._exchange     = exchange
-        self._min_quote_vol = min_quote_vol
-        self._top_n        = top_n
+        self._exchange          = exchange
+        self._min_quote_vol     = min_quote_vol
+        self._top_n             = top_n
+        self._exclude_mainstream = exclude_mainstream
 
     def scan(self, held_symbols: set[str] | None = None) -> list[str]:
         """
@@ -79,7 +92,7 @@ class SymbolScanner:
         candidates = []
         for t in tickers:
             sym = t.get("symbol", "")
-            if not _is_valid_symbol(sym):
+            if not _is_valid_symbol(sym, self._exclude_mainstream):
                 continue
             vol = t.get("quote_vol", 0) or 0
             if vol < self._min_quote_vol and sym not in held:
@@ -102,6 +115,8 @@ class SymbolScanner:
         logger.info(
             f"[Scanner] 掃描完成: 共 {len(tickers)} 個合約，"
             f"符合條件 {len(result)} 個"
-            f"（最低成交量門檻 {self._min_quote_vol:,.0f} USDT）"
+            f"（最低成交量門檻 {self._min_quote_vol:,.0f} USDT"
+            + ("，已排除主流幣" if self._exclude_mainstream else "")
+            + "）"
         )
         return result

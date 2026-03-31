@@ -96,6 +96,10 @@ def main() -> None:
         "--dry-run", action="store_true",
         help="模擬模式：只記錄信號，不實際下單",
     )
+    parser.add_argument(
+        "--include-mainstream", action="store_true",
+        help="納入主流幣（BTC/ETH/BNB/SOL 等），預設排除",
+    )
     args = parser.parse_args()
 
     if args.leverage < 1 or args.leverage > 125:
@@ -122,6 +126,7 @@ def main() -> None:
         exchange=exchange,
         min_quote_vol=min_volume,
         top_n=args.max_positions * 3,  # 候選池為最大持倉的 3 倍，留有餘裕
+        exclude_mainstream=not args.include_mainstream,
     )
 
     # qty_precision 由 RunnerManager 對每個幣種單獨查詢
