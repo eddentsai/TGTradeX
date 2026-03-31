@@ -3,13 +3,13 @@ Runner 執行緒管理器
 
 維護一個 {symbol → (ServiceRunner, Thread)} 字典。
 定期呼叫 SymbolScanner 取得目標幣種列表，
-新增/移除 runner 以對齊目標列表，同時控制最大持倉數量。
+對所有候選幣種起 runner 監控，
+各 runner 開倉前自行查詢交易所持倉數是否達到上限。
 """
 from __future__ import annotations
 
 import logging
 import threading
-import time
 
 from exchanges.base import BaseExchange
 from services.position_sizer import PositionSizer
@@ -26,7 +26,7 @@ class RunnerManager:
         scanner:         SymbolScanner 實例
         sizer:           PositionSizer 實例
         interval:        K 線週期，例如 "1h"
-        max_positions:   最多同時持倉（兼開倉）幾個幣種
+        max_positions:   最多同時持倉幣種數量（runner 數量不受此限）
         scan_interval:   掃描間隔秒數（預設 4 小時）
         dry_run:         True = 只記錄信號，不實際下單
     """
@@ -54,6 +54,9 @@ class RunnerManager:
         self._lock    = threading.Lock()
         self._stop_ev = threading.Event()
 
+        # 查詢過精度但失敗的幣種（交易所不支援），永久排除
+        self._invalid_symbols: set[str] = set()
+
     # ── 公開介面 ──────────────────────────────────────────────────────────────
 
     def run(self) -> None:
@@ -68,10 +71,8 @@ class RunnerManager:
                 self._sync_runners()
             except Exception as e:
                 logger.error(f"[Manager] 同步 runner 失敗: {e}")
-            # 等待下次掃描（可被 stop() 提前喚醒）
             self._stop_ev.wait(timeout=self._scan_interval)
 
-        # 停止所有 runner
         self._stop_all()
         logger.info("RunnerManager 已停止")
 
@@ -97,31 +98,29 @@ class RunnerManager:
     def _sync_runners(self) -> None:
         """
         根據掃描結果調整 runner 列表：
-          - 目標列表中、尚未啟動的 → 啟動（但受 max_positions 限制）
-          - 已啟動但不在目標列表中、且無倉位 → 停止
+          - 所有候選幣種都啟動 runner 監控（開倉上限由 runner 自己判斷）
+          - 不在候選列表且無持倉 → 停止 runner
+          - 查不到合約規格的幣種加入黑名單，下次掃描自動排除
         """
         held    = self._held_symbols()
         targets = self._scanner.scan(held_symbols=held)
 
-        # 限制最多 max_positions 個（已持倉的優先保留）
-        held_list    = [s for s in targets if s in held]
-        non_held     = [s for s in targets if s not in held]
-        quota        = max(0, self._max_positions - len(held_list))
-        final_targets = set(held_list + non_held[:quota])
+        # 排除已知無效幣種
+        targets = [s for s in targets if s not in self._invalid_symbols]
 
         logger.info(
-            f"[Manager] 目標幣種 ({len(final_targets)}): "
-            f"{sorted(final_targets)}"
+            f"[Manager] 候選幣種 ({len(targets)}): {sorted(targets)}  "
+            f"（持倉中: {sorted(held)}）"
         )
 
         with self._lock:
-            # 停掉不在目標列表中且沒有持倉的 runner
+            # 停掉不在候選列表中且無持倉的 runner
             for sym in list(self._runners.keys()):
-                if sym not in final_targets and sym not in held:
+                if sym not in targets and sym not in held:
                     self._stop_symbol(sym)
 
-            # 啟動目標列表中尚未運行的
-            for sym in final_targets:
+            # 啟動候選列表中尚未運行的
+            for sym in targets:
                 if sym not in self._runners:
                     self._start_symbol(sym)
 
@@ -130,7 +129,10 @@ class RunnerManager:
         try:
             qty_precision = self._exchange.get_qty_precision(symbol)
         except Exception as e:
-            logger.warning(f"[Manager] 無法取得 {symbol} 數量精度，跳過: {e}")
+            logger.warning(
+                f"[Manager] 無法取得 {symbol} 數量精度，加入黑名單: {e}"
+            )
+            self._invalid_symbols.add(symbol)
             return
 
         sizer = PositionSizer(
@@ -143,6 +145,7 @@ class RunnerManager:
             symbol=symbol,
             interval=self._interval,
             sizer=sizer,
+            max_positions=self._max_positions,
             dry_run=self._dry_run,
         )
         thread = threading.Thread(
@@ -162,7 +165,6 @@ class RunnerManager:
         runner, thread = entry
         runner.stop()
         logger.info(f"[Manager] 已通知 {symbol} runner 停止")
-        # 不 join — 讓它跑完當前週期自然退出
 
     def _stop_all(self) -> None:
         with self._lock:

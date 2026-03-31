@@ -82,16 +82,18 @@ class ServiceRunner:
         sizer: PositionSizer | None = None,
         fixed_qty: str | None = None,
         dry_run: bool = False,
+        max_positions: int = 0,
     ) -> None:
         if sizer is None and fixed_qty is None:
             raise ValueError("必須提供 sizer 或 fixed_qty 其中之一")
 
-        self._exchange  = exchange
-        self._symbol    = symbol.upper()
-        self._interval  = interval
-        self._sizer     = sizer
-        self._fixed_qty = fixed_qty
-        self._dry_run   = dry_run
+        self._exchange      = exchange
+        self._symbol        = symbol.upper()
+        self._interval      = interval
+        self._sizer         = sizer
+        self._fixed_qty     = fixed_qty
+        self._dry_run       = dry_run
+        self._max_positions = max_positions
         self._interval_sec = _INTERVAL_SECONDS.get(interval, 900)
 
         self._active_pos: ActivePosition | None = None
@@ -393,6 +395,19 @@ class ServiceRunner:
         if self._active_pos is not None:
             logger.warning(f"[{self._symbol}] 已有持倉，忽略開倉信號")
             return
+
+        # 檢查全域持倉上限
+        if self._max_positions > 0:
+            try:
+                all_positions = self._exchange.get_pending_positions()
+                if len(all_positions) >= self._max_positions:
+                    logger.info(
+                        f"[{self._symbol}] 已達持倉上限 "
+                        f"({len(all_positions)}/{self._max_positions})，跳過開倉"
+                    )
+                    return
+            except Exception as e:
+                logger.warning(f"[{self._symbol}] 查詢持倉數量失敗，允許開倉: {e}")
 
         side = "BUY" if signal.action == "open_long" else "SELL"
 
