@@ -139,27 +139,20 @@ class ServiceRunner:
 
     # ── 等待下一根 K 線 ───────────────────────────────────────────────────────
 
-    def _sleep_until_next_candle(self, base_offset_sec: int = 5) -> None:
+    def _sleep_until_next_candle(self, offset_sec: int = 5) -> None:
         """
-        睡眠到下一個 K 線整點邊界後，再加上 symbol 專屬的錯開秒數。
-
-        錯開邏輯：將 symbol 名稱 hash 映射到 0–(interval/4) 秒範圍內，
-        確保多個 runner 同時啟動時不會在同一秒集中打 API。
-        例如 1h 週期最多錯開 15 分鐘（900 秒），12 個 runner 平均間隔 75 秒。
+        睡眠到下一個 K 線整點邊界後 offset_sec 秒。
+        例如 1h 週期在 00:59:57 呼叫，會睡到 01:00:05。
+        分段睡眠以便能及時響應停止信號。
         """
-        max_stagger   = max(5, self._interval_sec // 4)
-        symbol_offset = hash(self._symbol) % max_stagger
-        total_offset  = base_offset_sec + symbol_offset
-
         now           = time.time()
         next_boundary = (int(now) // self._interval_sec + 1) * self._interval_sec
-        sleep_sec     = next_boundary + total_offset - now
-        wake_time     = time.strftime("%H:%M:%S", time.localtime(next_boundary + total_offset))
+        sleep_sec     = next_boundary + offset_sec - now
+        wake_time     = time.strftime("%H:%M:%S", time.localtime(next_boundary + offset_sec))
         logger.debug(
             f"[{self._symbol}] 等待下一根 {self._interval} K 線，"
-            f"睡眠 {sleep_sec:.1f}s（預計 {wake_time} 喚醒，錯開 {symbol_offset}s）"
+            f"睡眠 {sleep_sec:.1f}s（預計 {wake_time} 喚醒）"
         )
-        # 分段睡眠，每 10 秒檢查一次停止信號
         while sleep_sec > 0 and not self._stop_event.is_set():
             chunk = min(sleep_sec, 10)
             time.sleep(chunk)

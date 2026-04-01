@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from typing import Any
 
 import requests
@@ -11,6 +13,11 @@ from .signer import create_http_auth_headers
 DEFAULT_BASE_URL = "https://fapi.bitunix.com"
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_LANGUAGE = "en-US"
+
+# 保守設為 8 req/s（文件上限 10），多執行緒共用同一個 lock
+_RATE_LIMIT_RPS  = 8
+_RATE_LIMIT_DELAY = 1.0 / _RATE_LIMIT_RPS   # 0.125 秒
+_rate_lock = threading.Lock()
 
 
 class BitunixHttpTransport:
@@ -68,19 +75,22 @@ class BitunixHttpTransport:
         # 過濾掉 None 值的 query 參數
         params = {k: str(v) for k, v in (query or {}).items() if v is not None} or None
 
-        try:
-            response = self._session.request(
-                method=method,
-                url=url,
-                headers=headers,
-                params=params,
-                data=body_text if method != "GET" else None,
-                timeout=self.timeout,
-            )
-        except requests.Timeout as e:
-            raise BitunixError(f"請求逾時：{path}") from e
-        except requests.ConnectionError as e:
-            raise BitunixError(f"連線失敗：{path}") from e
+        with _rate_lock:
+            try:
+                response = self._session.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    params=params,
+                    data=body_text if method != "GET" else None,
+                    timeout=self.timeout,
+                )
+            except requests.Timeout as e:
+                raise BitunixError(f"請求逾時：{path}") from e
+            except requests.ConnectionError as e:
+                raise BitunixError(f"連線失敗：{path}") from e
+            finally:
+                time.sleep(_RATE_LIMIT_DELAY)
 
         if not response.ok:
             raise BitunixHttpError(response.status_code, response.text)
