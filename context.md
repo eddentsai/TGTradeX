@@ -144,6 +144,7 @@
 | 線性回歸斜率 | 20 | 趨勢方向驗證 |
 | 近期波動率 | 20 | 報酬率標準差（%）|
 | 成交量分佈（VA/POC）| 後 100 根 | 價值區上下限、最大成交量價位 |
+| VWAP | 後 24 根 | 成交量加權平均價 ± 1.5σ 帶（`vwap`, `vwap_upper`, `vwap_lower`）|
 
 EMA 和 ADX 使用 Wilder 平滑法（與多數交易所圖表一致）。
 
@@ -177,11 +178,41 @@ required_margin = position_value ÷ leverage
 
 `BaseStrategy.on_candle(snap, position)` → `Signal`。`position=None` 時判斷入場，否則判斷出場。
 
-| 策略 | 觸發市場 | 入場條件 | 出場條件 |
+| 策略 | 對應市場 | 入場條件 | 出場條件 |
 |------|---------|---------|---------|
-| `TrendFollowingStrategy` | UPTREND | EMA20 ±2% + RSI 30–65 + BB 20%–60% | EMA20 下彎 / RSI > 75 / SL-TP |
-| `VolumeProfileStrategy` | RANGING | VAL ±1.5% + RSI < 40 | POC ±1.5% / SL-TP |
-| `ConservativeStrategy` | DOWNTREND / HIGH_VOL | 不入場 | 有倉位則平倉 |
+| `FibonacciStrategy` | UPTREND | EMA20 > EMA50 + 回調至 Fib 0.618/0.5/0.382 + 錘子線確認 | 前高（TP）/ Fib 0.786 下方（SL）|
+| `VwapPocStrategy` | RANGING | POC > VWAP + 跌至 VWAP-1.5σ + RSI < 40 + R:R ≥ 1.5 | VWAP 提前出場 / POC 全倉出場 / SL=VWAP-2.5σ |
+| `DipVolumeStrategy` | HIGH_VOLATILITY | 近 5 根跌幅 > 3% + 量比 > 3x + 止跌確認（無新低+下影線）| 反彈至 EMA20 / TP +3% / SL -1.5% / 時間止損 10 根 |
+| `ConservativeStrategy` | DOWNTREND | 不入場 | 有倉位則平倉 |
+| `EnsembleStrategy` | 可選模式 | ≥ 2 個策略同時確認開倉；SL 取最高，TP 取最低（最保守）| 任一策略觸發出場即出場 |
+
+`ServiceRunner` 支援 `enable_ensemble=True` 參數，啟用時在入場判斷改用 `DipVolumeStrategy + VwapPocStrategy + FibonacciStrategy` 三策略多數決。
+
+**`services/external_data/`**  ⚠️ *已實作，尚未整合進交易週期*
+
+外部市場情緒數據層，提供技術指標之外的資訊優勢。
+
+`BaseDataProvider`（`base.py`）— 抽象介面，定義三個必實作方法：
+- `get_funding_rate(symbol)` → `float`
+- `get_liquidations(symbol, period)` → `{long, short}`
+- `get_long_short_ratio(symbol)` → `float`
+
+`CoinglassProvider`（`coinglass.py`）— 呼叫 Coinglass REST API：
+- `GET /futures/funding-rate`
+- `GET /futures/liquidation`（含 `get_liquidation_heatmap` 額外方法）
+- `GET /futures/long-short-ratio`
+
+`MarketBiasCalculator`（`market_bias.py`）— 綜合三個數據源計算市場偏向分數（-100 ~ +100）：
+
+| 數據來源 | 評分邏輯 | 分值範圍 |
+|---------|---------|---------|
+| 資金費率 | 費率 > 0.05% → 多頭擁擠偏空；< -0.05% → 偏多 | ±15 |
+| 清算數據 | 1h 多頭清算 > 5000 萬 → 洗盤偏多 | ±20 |
+| 多空比 | 散戶 > 2x 看多 → 反向偏空（反向指標）| ±10 |
+
+各數據源獨立容錯，單一失敗不影響整體分數。
+
+**目前整合狀態**：`MarketBiasCalculator` 已建立但尚未在 `ServiceRunner._run_cycle()` 中呼叫。計畫整合方式：在策略信號分數 < 閾值時，以市場偏向分數作為過濾或加權條件。
 
 ---
 
@@ -308,6 +339,9 @@ TGListener.reply_text() → Telegram 使用者
 
 ## 已知限制 / 未來方向
 
+- **外部數據未整合**：`MarketBiasCalculator`（資金費率、清算數據、多空比）已實作但尚未接入 `ServiceRunner._run_cycle()`。計畫作為開倉前的情緒過濾層（例如偏向分數 < -30 時禁止做多）。
+- **分批出場未實作**：`DipVolumeStrategy` 和 `VwapPocStrategy` 的分批平倉邏輯（半倉/全倉）待 `Signal` 新增 `quantity_pct` 欄位後再啟用，目前一律全倉出場。
+- **EnsembleStrategy 兩套實作並存**：`services/strategies/ensemble.py` 為完整的 `EnsembleStrategy` 類別；`ServiceRunner._get_ensemble_signal()` 為內聯版。目前 runner 使用內聯版，未來可統一改用類別版。
 - **未實作 WebSocket 確認成交**：目前 `place_order` 只確認訂單送出，不等待成交事件。`exchanges/bitunix/trading_flow.py` 有 `run_futures_trading_flow` 可做完整生命週期管理，未來可整合至 runner。
 - **position_id 延遲**：市價單填充後 position_id 需等下一週期才能從交易所取得。若需即時取得，可在開倉後加入短暫等待與即時查詢。
 - **清算價為估算值**：孤立保證金模式下的清算價因交易所計算細節（維持保證金率、手續費）可能有誤差，實際以交易所顯示為準。

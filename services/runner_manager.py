@@ -5,16 +5,31 @@ Runner 執行緒管理器
 定期呼叫 SymbolScanner 取得目標幣種列表，
 對所有候選幣種起 runner 監控，
 各 runner 開倉前自行查詢交易所持倉數是否達到上限。
+
+支援兩種模式：
+  - 一般模式（enable_ensemble=False）：ServiceRunner 自行根據市場狀態選策略（原本行為）
+  - Ensemble 模式（enable_ensemble=True）：三策略同時評估，N/3 確認才開倉
 """
+
 from __future__ import annotations
 
 import logging
 import threading
+from typing import TYPE_CHECKING
 
 from exchanges.base import BaseExchange
 from services.position_sizer import PositionSizer
 from services.runner import ServiceRunner
+from services.strategies.ensemble import EnsembleStrategy  # ← 改成 import
 from services.symbol_scanner import SymbolScanner
+
+if TYPE_CHECKING:
+    from services.strategies.base import (
+        ActivePosition,
+        BaseStrategy,
+        IndicatorSnapshot,
+        Signal,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -22,13 +37,16 @@ logger = logging.getLogger(__name__)
 class RunnerManager:
     """
     Args:
-        exchange:        已初始化的交易所客戶端
-        scanner:         SymbolScanner 實例
-        sizer:           PositionSizer 實例
-        interval:        K 線週期，例如 "1h"
-        max_positions:   最多同時持倉幣種數量（runner 數量不受此限）
-        scan_interval:   掃描間隔秒數（預設 4 小時）
-        dry_run:         True = 只記錄信號，不實際下單
+        exchange:               已初始化的交易所客戶端
+        scanner:                SymbolScanner 實例
+        sizer:                  PositionSizer 實例
+        interval:               K 線週期，例如 "1h"
+        max_positions:          最多同時持倉幣種數量（runner 數量不受此限）
+        scan_interval:          掃描間隔秒數（預設 4 小時）
+        dry_run:                True = 只記錄信號，不實際下單
+        enable_ensemble:        True = 啟用 Ensemble 多策略確認模式
+        ensemble_strategies:    Ensemble 模式下使用的策略清單（需 enable_ensemble=True）
+        ensemble_min_confirm:   Ensemble 開倉所需最少確認策略數（預設 2）
     """
 
     def __init__(
@@ -40,29 +58,42 @@ class RunnerManager:
         max_positions: int = 5,
         scan_interval: int = 14400,
         dry_run: bool = False,
+        enable_ensemble: bool = False,
+        ensemble_strategies: "list[BaseStrategy] | None" = None,
+        ensemble_min_confirm: int = 2,
     ) -> None:
-        self._exchange      = exchange
-        self._scanner       = scanner
-        self._sizer         = sizer
-        self._interval      = interval
+        self._exchange = exchange
+        self._scanner = scanner
+        self._sizer = sizer
+        self._interval = interval
         self._max_positions = max_positions
         self._scan_interval = scan_interval
-        self._dry_run       = dry_run
+        self._dry_run = dry_run
+        self._enable_ensemble = enable_ensemble
+        self._ensemble_strategies = ensemble_strategies or []
+        self._ensemble_min_confirm = ensemble_min_confirm
 
-        # symbol -> (runner, thread)
+        if enable_ensemble and not self._ensemble_strategies:
+            raise ValueError("enable_ensemble=True 時，ensemble_strategies 不可為空")
+
         self._runners: dict[str, tuple[ServiceRunner, threading.Thread]] = {}
-        self._lock    = threading.Lock()
+        self._lock = threading.Lock()
         self._stop_ev = threading.Event()
 
-        # 查詢過精度但失敗的幣種（交易所不支援），永久排除
         self._invalid_symbols: set[str] = set()
 
     # ── 公開介面 ──────────────────────────────────────────────────────────────
 
     def run(self) -> None:
         """主迴圈：定期掃描並同步 runner 列表，直到收到停止信號"""
+        mode_label = (
+            f"Ensemble({self._ensemble_min_confirm}/{len(self._ensemble_strategies)})"
+            if self._enable_ensemble
+            else "Normal"
+        )
         logger.info(
             f"RunnerManager 啟動  exchange={self._exchange.name} "
+            f"mode={mode_label} "
             f"max_positions={self._max_positions} "
             f"scan_interval={self._scan_interval}s"
         )
@@ -102,10 +133,8 @@ class RunnerManager:
           - 不在候選列表且無持倉 → 停止 runner
           - 查不到合約規格的幣種加入黑名單，下次掃描自動排除
         """
-        held    = self._held_symbols()
+        held = self._held_symbols()
         targets = self._scanner.scan(held_symbols=held)
-
-        # 排除已知無效幣種
         targets = [s for s in targets if s not in self._invalid_symbols]
 
         logger.info(
@@ -114,24 +143,32 @@ class RunnerManager:
         )
 
         with self._lock:
-            # 停掉不在候選列表中且無持倉的 runner
             for sym in list(self._runners.keys()):
                 if sym not in targets and sym not in held:
                     self._stop_symbol(sym)
-
-            # 啟動候選列表中尚未運行的
             for sym in targets:
                 if sym not in self._runners:
                     self._start_symbol(sym)
+
+    def _build_strategy(self) -> "BaseStrategy | None":
+        """
+        根據模式回傳策略實例：
+          - Ensemble 模式 → EnsembleStrategy（包裝所有策略）
+          - 一般模式      → None（ServiceRunner 自行選策略）
+        """
+        if self._enable_ensemble:
+            return EnsembleStrategy(
+                strategies=self._ensemble_strategies,
+                min_confirm=self._ensemble_min_confirm,
+            )
+        return None
 
     def _start_symbol(self, symbol: str) -> None:
         """建立並啟動一個 ServiceRunner 執行緒（需持有 _lock）"""
         try:
             qty_precision = self._exchange.get_qty_precision(symbol)
         except Exception as e:
-            logger.warning(
-                f"[Manager] 無法取得 {symbol} 數量精度，加入黑名單: {e}"
-            )
+            logger.warning(f"[Manager] 無法取得 {symbol} 數量精度，加入黑名單: {e}")
             self._invalid_symbols.add(symbol)
             return
 
@@ -140,6 +177,7 @@ class RunnerManager:
             risk_pct=self._sizer.risk_pct,
             qty_precision=qty_precision,
         )
+        strategy = self._build_strategy()
         runner = ServiceRunner(
             exchange=self._exchange,
             symbol=symbol,
@@ -148,6 +186,7 @@ class RunnerManager:
             max_positions=self._max_positions,
             dry_run=self._dry_run,
             on_symbol_banned=self._ban_symbol,
+            strategy=strategy,
         )
         thread = threading.Thread(
             target=runner.run,
@@ -156,7 +195,11 @@ class RunnerManager:
         )
         self._runners[symbol] = (runner, thread)
         thread.start()
-        logger.info(f"[Manager] 已啟動 {symbol} runner（執行緒 {thread.name}）")
+        logger.info(
+            f"[Manager] 已啟動 {symbol} runner "
+            f"（執行緒 {thread.name}, "
+            f"策略: {strategy.name if strategy else 'auto'}）"
+        )
 
     def _stop_symbol(self, symbol: str) -> None:
         """停止並移除一個 runner（需持有 _lock）"""

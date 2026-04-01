@@ -4,6 +4,7 @@
 每根 K 線結束後執行一次完整的決策週期：
   取得 K 線 → 計算指標 → 識別市場狀態 → 選擇策略 → 產生信號 → 執行下單
 """
+
 from __future__ import annotations
 
 import logging
@@ -12,13 +13,20 @@ import time
 
 from exchanges.base import BaseExchange
 from services.indicators import IndicatorSnapshot, candles_from_raw, compute_indicators
-from services.market_state import MarketState, STATE_LABELS, classify_market
+from services.market_state import STATE_LABELS, MarketState, classify_market
 from services.position_sizer import PositionSizer, SizeResult
-from services.position_store import delete as pos_delete, load as pos_load, save as pos_save
+from services.position_store import delete as pos_delete
+from services.position_store import load as pos_load
+from services.position_store import save as pos_save
 from services.strategies.base import ActivePosition, BaseStrategy, Signal
 from services.strategies.conservative import ConservativeStrategy
+
+# 新增策略導入
+from services.strategies.dip_volume import DipVolumeStrategy
+from services.strategies.fibonacci import FibonacciStrategy
 from services.strategies.trend_following import TrendFollowingStrategy
 from services.strategies.volume_profile import VolumeProfileStrategy
+from services.strategies.vwap_poc import VwapPocStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +36,10 @@ def _is_symbol_banned_error(e: Exception) -> bool:
     判斷是否為「此幣種永久不支援」的錯誤，遇到時 runner 應自行停止。
     """
     msg = str(e)
-    return "710002" in msg or "does not currently support trading via openapi" in msg.lower()
+    return (
+        "710002" in msg
+        or "does not currently support trading via openapi" in msg.lower()
+    )
 
 
 def _is_transient_error(e: Exception) -> bool:
@@ -38,35 +49,53 @@ def _is_transient_error(e: Exception) -> bool:
     - 或 cause 是 requests 的 ReadTimeout / ConnectionError
     """
     msg = str(e).lower()
-    if any(k in msg for k in ("逾時", "timeout", "timed out", "connection reset",
-                               "request too frequently", "10006", "rate limit")):
+    if any(
+        k in msg
+        for k in (
+            "逾時",
+            "timeout",
+            "timed out",
+            "connection reset",
+            "request too frequently",
+            "10006",
+            "rate limit",
+        )
+    ):
         return True
     cause = getattr(e, "__cause__", None)
     if cause is not None:
         try:
-            from requests.exceptions import (
-                ReadTimeout,
-                ConnectionError as ReqConnectionError,
-            )
+            from requests.exceptions import ConnectionError as ReqConnectionError
+            from requests.exceptions import ReadTimeout
+
             if isinstance(cause, (ReadTimeout, ReqConnectionError)):
                 return True
         except ImportError:
             pass
     return False
 
+
 _INTERVAL_SECONDS: dict[str, int] = {
-    "1m": 60, "3m": 180, "5m": 300, "15m": 900,
-    "30m": 1800, "1h": 3600, "2h": 7200, "4h": 14400,
-    "6h": 21600, "12h": 43200, "1d": 86400,
+    "1m": 60,
+    "3m": 180,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "2h": 7200,
+    "4h": 14400,
+    "6h": 21600,
+    "12h": 43200,
+    "1d": 86400,
 }
 
 # 各週期 K 線 fetch 數量（volume profile 用全部，需覆蓋足夠的歷史）
 # 15m=1週, 1h=1個月, 4h=3個月, 1d=6個月，其他保守預設
 _KLINE_LIMIT: dict[str, int] = {
-    "15m": 700,   # 7 天 × 24h × 4 = 672 根
-    "1h":  750,   # 30 天 × 24 = 720 根
-    "4h":  560,   # 90 天 × 6 = 540 根
-    "1d":  200,   # 180 天，加 buffer
+    "15m": 700,  # 7 天 × 24h × 4 = 672 根
+    "1h": 750,  # 30 天 × 24 = 720 根
+    "4h": 560,  # 90 天 × 6 = 540 根
+    "1d": 200,  # 180 天，加 buffer
 }
 
 
@@ -81,6 +110,8 @@ class ServiceRunner:
         sizer:      倉位計算器（建議使用）；為 None 時必須提供 fixed_qty
         fixed_qty:  固定開倉數量（覆蓋 sizer，手動指定時使用）
         dry_run:    True = 只記錄信號，不實際下單
+        strategy:   外部注入的策略實例（例如 EnsembleStrategy）；
+                    為 None 時由 runner 根據市場狀態自動選策略
     """
 
     def __init__(
@@ -93,28 +124,31 @@ class ServiceRunner:
         dry_run: bool = False,
         max_positions: int = 0,
         on_symbol_banned: callable = None,
+        strategy: BaseStrategy | None = None,
     ) -> None:
         if sizer is None and fixed_qty is None:
             raise ValueError("必須提供 sizer 或 fixed_qty 其中之一")
 
-        self._exchange          = exchange
-        self._symbol            = symbol.upper()
-        self._interval          = interval
-        self._sizer             = sizer
-        self._fixed_qty         = fixed_qty
-        self._dry_run           = dry_run
-        self._max_positions     = max_positions
-        self._on_symbol_banned  = on_symbol_banned
+        self._exchange = exchange
+        self._symbol = symbol.upper()
+        self._interval = interval
+        self._sizer = sizer
+        self._fixed_qty = fixed_qty
+        self._dry_run = dry_run
+        self._max_positions = max_positions
+        self._on_symbol_banned = on_symbol_banned
+        self._fixed_strategy = strategy  # 外部注入時固定使用；None = 自動切換
         self._interval_sec = _INTERVAL_SECONDS.get(interval, 900)
 
         self._active_pos: ActivePosition | None = None
         self._stop_event = threading.Event()
 
+        # 自動切換模式的策略映射（_fixed_strategy 不為 None 時不使用）
         self._strategies: dict[MarketState, BaseStrategy] = {
-            MarketState.UPTREND:          TrendFollowingStrategy(),
-            MarketState.DOWNTREND:        ConservativeStrategy(),
-            MarketState.RANGING:          VolumeProfileStrategy(),
-            MarketState.HIGH_VOLATILITY:  ConservativeStrategy(),
+            MarketState.UPTREND:         FibonacciStrategy(),
+            MarketState.DOWNTREND:       ConservativeStrategy(),
+            MarketState.RANGING:         VwapPocStrategy(),
+            MarketState.HIGH_VOLATILITY: DipVolumeStrategy(),
         }
 
     def stop(self) -> None:
@@ -128,10 +162,16 @@ class ServiceRunner:
         qty_desc = (
             f"auto-sizer leverage={self._sizer.leverage}x "
             f"risk={self._sizer.risk_pct*100:.1f}%"
-            if self._sizer else f"fixed_qty={self._fixed_qty}"
+            if self._sizer
+            else f"fixed_qty={self._fixed_qty}"
+        )
+        strategy_desc = (
+            f" strategy={self._fixed_strategy.name}"
+            if self._fixed_strategy
+            else " strategy=auto"
         )
         logger.info(
-            f"{mode}TGTradeX 啟動 "
+            f"{mode}TGTradeX 啟動{strategy_desc} "
             f"exchange={self._exchange.name} symbol={self._symbol} "
             f"interval={self._interval} {qty_desc}"
         )
@@ -163,10 +203,12 @@ class ServiceRunner:
         例如 1h 週期在 00:59:57 呼叫，會睡到 01:00:05。
         分段睡眠以便能及時響應停止信號。
         """
-        now           = time.time()
+        now = time.time()
         next_boundary = (int(now) // self._interval_sec + 1) * self._interval_sec
-        sleep_sec     = next_boundary + offset_sec - now
-        wake_time     = time.strftime("%H:%M:%S", time.localtime(next_boundary + offset_sec))
+        sleep_sec = next_boundary + offset_sec - now
+        wake_time = time.strftime(
+            "%H:%M:%S", time.localtime(next_boundary + offset_sec)
+        )
         logger.debug(
             f"[{self._symbol}] 等待下一根 {self._interval} K 線，"
             f"睡眠 {sleep_sec:.1f}s（預計 {wake_time} 喚醒）"
@@ -178,7 +220,9 @@ class ServiceRunner:
 
     # ── 暫時性錯誤重試 ────────────────────────────────────────────────────────
 
-    def _run_cycle_with_retry(self, max_retries: int = 3, retry_delay: int = 20) -> None:
+    def _run_cycle_with_retry(
+        self, max_retries: int = 3, retry_delay: int = 20
+    ) -> None:
         """
         執行一次週期，對暫時性網路錯誤（timeout / connection）自動重試。
         非網路錯誤（邏輯錯誤、API 業務錯誤）直接拋出，不重試。
@@ -195,7 +239,7 @@ class ServiceRunner:
                         f"[{self._symbol}] 網路錯誤，已重試 {max_retries} 次仍失敗，"
                         f"跳過本週期: {e}"
                     )
-                    return   # 不 raise，讓主迴圈繼續等下一根 K 線
+                    return  # 不 raise，讓主迴圈繼續等下一根 K 線
                 logger.warning(
                     f"[{self._symbol}] 網路錯誤（第 {attempt}/{max_retries} 次），"
                     f"{retry_delay}s 後重試: {e}"
@@ -206,8 +250,9 @@ class ServiceRunner:
 
     def _run_cycle(self) -> None:
         # 1. 取得 K 線
-        raw     = self._exchange.get_klines(
-            self._symbol, self._interval,
+        raw = self._exchange.get_klines(
+            self._symbol,
+            self._interval,
             limit=_KLINE_LIMIT.get(self._interval, 500),
         )
         candles = candles_from_raw(raw)
@@ -215,7 +260,7 @@ class ServiceRunner:
             logger.warning(f"K 線數量不足 ({len(candles)} 根)，跳過")
             return
 
-        # 2. 計算指標
+        # 2. 計算指標（傳入原始 K 線數據）
         snap = compute_indicators(candles)
 
         # 3. 識別市場狀態
@@ -229,19 +274,22 @@ class ServiceRunner:
         )
 
         # 4. 核對倉位
-        positions  = self._exchange.get_pending_positions(self._symbol)
+        positions = self._exchange.get_pending_positions(self._symbol)
         active_pos = self._reconcile_position(positions, snap)
 
-        # 5. 策略切換保護（開倉策略 ≠ 當前策略時，依盈虧分流）
-        strategy      = self._strategies[state]
-        had_position  = active_pos is not None
-        active_pos    = self._handle_strategy_switch(snap, active_pos, strategy.name)
-        just_closed   = had_position and active_pos is None and self._active_pos is None
+        # 5. 選策略
+        # 外部注入（例如 EnsembleStrategy）優先；否則根據市場狀態自動選
+        strategy = self._fixed_strategy or self._strategies[state]
+
+        # 策略切換保護：只在自動切換模式下有意義
+        had_position = active_pos is not None
+        active_pos = self._handle_strategy_switch(snap, active_pos, strategy.name)
+        just_closed = had_position and active_pos is None and self._active_pos is None
         if just_closed:
             # 剛被策略切換平倉，本週期不再嘗試開新倉
             return
 
-        # 6. 選策略 → 產生信號
+        # 6. 產生信號
         signal = strategy.on_candle(snap, active_pos)
         logger.info(
             f"[{self._symbol}] 策略={strategy.name}  "
@@ -318,9 +366,7 @@ class ServiceRunner:
         positions: list[dict],
         snap: IndicatorSnapshot,
     ) -> ActivePosition | None:
-        pos_dict = next(
-            (p for p in positions if p.get("symbol") == self._symbol), None
-        )
+        pos_dict = next((p for p in positions if p.get("symbol") == self._symbol), None)
 
         if pos_dict is None:
             if self._active_pos is not None:
@@ -355,9 +401,9 @@ class ServiceRunner:
                 )
             else:
                 # 無快取：只能用保守 5% 重建
-                entry    = float(pos_dict.get("openPrice", snap.close))
-                side     = pos_dict.get("side", "BUY")
-                qty      = str(pos_dict.get("qty", self._fixed_qty or "0"))
+                entry = float(pos_dict.get("openPrice", snap.close))
+                side = pos_dict.get("side", "BUY")
+                qty = str(pos_dict.get("qty", self._fixed_qty or "0"))
                 sl_price = entry * (0.95 if side == "BUY" else 1.05)
                 tp_price = entry * (1.05 if side == "BUY" else 0.95)
                 self._active_pos = ActivePosition(
@@ -392,7 +438,9 @@ class ServiceRunner:
             if not self._active_pos.position_id:
                 self._active_pos.position_id = pos_dict.get("positionId", "")
                 if self._active_pos.position_id:
-                    pos_save(self._exchange.name, self._symbol, self._active_pos)  # 補存 position_id
+                    pos_save(
+                        self._exchange.name, self._symbol, self._active_pos
+                    )  # 補存 position_id
 
         return self._active_pos
 
@@ -441,25 +489,27 @@ class ServiceRunner:
             return
 
         payload: dict = {
-            "symbol":    self._symbol,
-            "side":      side,
+            "symbol": self._symbol,
+            "side": side,
             "orderType": signal.order_type,
-            "qty":       qty,
+            "qty": qty,
             "tradeSide": "OPEN",
         }
         if signal.order_type == "LIMIT" and signal.price:
-            payload["price"]  = signal.price
+            payload["price"] = signal.price
             payload["effect"] = "GTC"
 
         # 交易所層面的 SL/TP 保護單（閃崩時不依賴本服務輪詢）
         entry = snap.close
-        sl    = signal.stop_loss  or (size_result.liquidation_price * 1.05 if size_result else entry * 0.95)
-        tp    = signal.take_profit or entry * 1.05
-        payload["slPrice"]    = str(round(sl, 8))
+        sl = signal.stop_loss or (
+            size_result.liquidation_price * 1.05 if size_result else entry * 0.95
+        )
+        tp = signal.take_profit or entry * 1.05
+        payload["slPrice"] = str(round(sl, 8))
         payload["slStopType"] = "MARK_PRICE"
         payload["slOrderType"] = "MARKET"
-        payload["tpPrice"]     = str(round(tp, 8))
-        payload["tpStopType"]  = "MARK_PRICE"
+        payload["tpPrice"] = str(round(tp, 8))
+        payload["tpStopType"] = "MARK_PRICE"
         payload["tpOrderType"] = "LIMIT"
         payload["tpOrderPrice"] = str(round(tp, 8))
 
@@ -533,7 +583,7 @@ class ServiceRunner:
 
         if not active_pos.position_id:
             positions = self._exchange.get_pending_positions(self._symbol)
-            pos_dict  = next(
+            pos_dict = next(
                 (p for p in positions if p.get("symbol") == self._symbol), None
             )
             if pos_dict:
@@ -550,11 +600,11 @@ class ServiceRunner:
 
         close_side = "SELL" if active_pos.side == "BUY" else "BUY"
         payload = {
-            "symbol":     self._symbol,
-            "side":       close_side,
-            "orderType":  "MARKET",
-            "qty":        active_pos.qty,
-            "tradeSide":  "CLOSE",
+            "symbol": self._symbol,
+            "side": close_side,
+            "orderType": "MARKET",
+            "qty": active_pos.qty,
+            "tradeSide": "CLOSE",
             "positionId": active_pos.position_id,
         }
 
