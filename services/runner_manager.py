@@ -147,6 +147,7 @@ class RunnerManager:
             sizer=sizer,
             max_positions=self._max_positions,
             dry_run=self._dry_run,
+            on_symbol_banned=self._ban_symbol,
         )
         thread = threading.Thread(
             target=runner.run,
@@ -165,6 +166,13 @@ class RunnerManager:
         runner, thread = entry
         runner.stop()
         logger.info(f"[Manager] 已通知 {symbol} runner 停止")
+
+    def _ban_symbol(self, symbol: str) -> None:
+        """runner 回呼：將幣種加入永久黑名單並移除 runner"""
+        self._invalid_symbols.add(symbol)
+        logger.warning(f"[Manager] {symbol} 加入黑名單（不支援 API 交易）")
+        with self._lock:
+            self._stop_symbol(symbol)
 
     def _stop_all(self) -> None:
         with self._lock:

@@ -23,6 +23,14 @@ from services.strategies.volume_profile import VolumeProfileStrategy
 logger = logging.getLogger(__name__)
 
 
+def _is_symbol_banned_error(e: Exception) -> bool:
+    """
+    判斷是否為「此幣種永久不支援」的錯誤，遇到時 runner 應自行停止。
+    """
+    msg = str(e)
+    return "710002" in msg or "does not currently support trading via openapi" in msg.lower()
+
+
 def _is_transient_error(e: Exception) -> bool:
     """
     判斷是否為可重試的暫時性網路錯誤。
@@ -84,17 +92,19 @@ class ServiceRunner:
         fixed_qty: str | None = None,
         dry_run: bool = False,
         max_positions: int = 0,
+        on_symbol_banned: callable = None,
     ) -> None:
         if sizer is None and fixed_qty is None:
             raise ValueError("必須提供 sizer 或 fixed_qty 其中之一")
 
-        self._exchange      = exchange
-        self._symbol        = symbol.upper()
-        self._interval      = interval
-        self._sizer         = sizer
-        self._fixed_qty     = fixed_qty
-        self._dry_run       = dry_run
-        self._max_positions = max_positions
+        self._exchange          = exchange
+        self._symbol            = symbol.upper()
+        self._interval          = interval
+        self._sizer             = sizer
+        self._fixed_qty         = fixed_qty
+        self._dry_run           = dry_run
+        self._max_positions     = max_positions
+        self._on_symbol_banned  = on_symbol_banned
         self._interval_sec = _INTERVAL_SECONDS.get(interval, 900)
 
         self._active_pos: ActivePosition | None = None
@@ -132,6 +142,14 @@ class ServiceRunner:
                 logger.info("收到中斷信號，服務停止")
                 break
             except Exception as e:
+                if _is_symbol_banned_error(e):
+                    logger.error(
+                        f"[{self._symbol}] 此幣種不支援 API 交易，停止監控: {e}"
+                    )
+                    if self._on_symbol_banned:
+                        self._on_symbol_banned(self._symbol)
+                    self._stop_event.set()
+                    break
                 logger.exception(f"週期執行錯誤（非暫時性，跳過本週期）: {e}")
             if not self._stop_event.is_set():
                 self._sleep_until_next_candle()
