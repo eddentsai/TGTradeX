@@ -25,7 +25,9 @@ import signal
 import sys
 
 import config.settings as settings
+from services.notifier import TelegramNotifier
 from services.position_sizer import PositionSizer
+from services.risk_guard import RiskGuard
 from services.runner_manager import RunnerManager
 from services.symbol_scanner import SymbolScanner
 
@@ -126,6 +128,18 @@ def main() -> None:
         help="用指定交易所的成交量來掃描幣種（預設 binance）；"
              "Binance 成交量較大且更接近市場真實流動性，建議保持預設",
     )
+    parser.add_argument(
+        "--max-consecutive-losses",
+        type=int,
+        default=3,
+        help="連續虧損達此次數後停止開倉（預設 3）",
+    )
+    parser.add_argument(
+        "--max-daily-loss",
+        type=float,
+        default=10.0,
+        help="當日累計虧損百分比上限（預設 10.0）；超過後停止開倉，次日 UTC 00:00 自動恢復",
+    )
     args = parser.parse_args()
 
     if args.leverage < 1 or args.leverage > 125:
@@ -149,6 +163,20 @@ def main() -> None:
         f"min_volume={min_volume:,.0f} USDT "
         f"scan_interval={args.scan_interval}s "
         f"interval={args.interval}"
+    )
+
+    # ── 建立通知器 + 風控守衛 ─────────────────────────────────────────────────
+    notifier: TelegramNotifier | None = None
+    if settings.TG_BOT_TOKEN and settings.TG_CHAT_ID:
+        notifier = TelegramNotifier(settings.TG_BOT_TOKEN, settings.TG_CHAT_ID)
+        log.info(f"Telegram 通知已啟用 (chat_id={settings.TG_CHAT_ID})")
+    else:
+        log.info("Telegram 通知未設定（需同時設定 TG_BOT_TOKEN 和 TG_CHAT_ID）")
+
+    risk_guard = RiskGuard(
+        max_consecutive_losses=args.max_consecutive_losses,
+        max_daily_loss_pct=args.max_daily_loss,
+        notifier=notifier,
     )
 
     exchange = _build_exchange(args.exchange)
@@ -179,15 +207,24 @@ def main() -> None:
         scan_interval=args.scan_interval,
         dry_run=args.dry_run,
         redis_url=args.redis_url or None,
+        notifier=notifier,
+        risk_guard=risk_guard,
     )
 
     # 處理 Ctrl-C / SIGTERM
-    def _handle_signal(sig, frame):
+    def _handle_signal(sig, _):
         log.info(f"收到信號 {sig}，正在停止服務...")
         manager.stop()
 
     signal.signal(signal.SIGINT,  _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
+
+    if notifier is not None:
+        notifier.notify_start(
+            exchange=args.exchange,
+            mode="Auto",
+            interval=args.interval,
+        )
 
     manager.run()
     sys.exit(0)

@@ -356,6 +356,17 @@ class BinanceExchange(BaseExchange):
                 return int(getattr(s, "price_precision", 2))
         return 2  # 預設 2 位小數
 
+    def get_funding_rate(self, symbol: str) -> float:
+        """取得指定交易對的當前資金費率（十進位小數，例如 0.0001 = 0.01%）"""
+        try:
+            url  = f"{self._base_path}/fapi/v1/premiumIndex"
+            resp = _requests.get(url, params={"symbol": symbol}, timeout=5)
+            if resp.ok:
+                return float(resp.json().get("lastFundingRate", 0) or 0)
+            return 0.0
+        except Exception:
+            return 0.0
+
     def get_tickers(self) -> list[dict]:
         """
         取得 Binance 所有 USDS-M 合約 ticker，正規化為 BaseExchange 標準格式。

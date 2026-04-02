@@ -69,6 +69,14 @@ class BaseExchange(ABC):
     def get_qty_precision(self, symbol: str) -> int:
         """回傳該交易對的數量小數位數（例如 BTC=3, ETH=2, SOL=1）"""
 
+    def get_funding_rate(self, symbol: str) -> float:
+        """
+        取得指定交易對的當前資金費率（十進位小數，例如 0.0001 = 0.01%）。
+        正值代表多頭支付空頭；負值代表空頭支付多頭。
+        不支援資金費率的交易所保持預設回傳 0.0 即可。
+        """
+        return 0.0
+
     @abstractmethod
     def get_tickers(self) -> list[dict]:
         """

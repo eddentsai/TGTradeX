@@ -18,7 +18,9 @@ import threading
 from typing import TYPE_CHECKING
 
 from exchanges.base import BaseExchange
+from services.notifier import TelegramNotifier
 from services.position_sizer import PositionSizer
+from services.risk_guard import RiskGuard
 from services.runner import ServiceRunner
 from services.strategies.ensemble import EnsembleStrategy
 from services.symbol_scanner import SymbolScanner
@@ -63,6 +65,8 @@ class RunnerManager:
         ensemble_strategies: "list[BaseStrategy] | None" = None,
         ensemble_min_confirm: int = 2,
         redis_url: str | None = "redis://localhost:6379/0",
+        notifier: TelegramNotifier | None = None,
+        risk_guard: RiskGuard | None = None,
     ) -> None:
         self._exchange = exchange
         self._scanner = scanner
@@ -81,6 +85,9 @@ class RunnerManager:
         self._runners: dict[str, tuple[ServiceRunner, threading.Thread]] = {}
         self._lock = threading.Lock()
         self._stop_ev = threading.Event()
+
+        self._notifier = notifier
+        self._risk_guard = risk_guard
 
         # 黑名單：從 Redis 載入（若可用），否則只用記憶體
         self._redis = self._connect_redis(redis_url)
@@ -232,6 +239,8 @@ class RunnerManager:
             dry_run=self._dry_run,
             on_symbol_banned=self._ban_symbol,
             strategy=strategy,
+            notifier=self._notifier,
+            risk_guard=self._risk_guard,
         )
         thread = threading.Thread(
             target=runner.run,
@@ -260,6 +269,8 @@ class RunnerManager:
         self._invalid_symbols.add(symbol)
         self._persist_ban(symbol)
         logger.warning(f"[Manager] {symbol} 加入黑名單（不支援 API 交易）")
+        if self._notifier is not None:
+            self._notifier.notify_ban(symbol, self._exchange.name)
         with self._lock:
             self._stop_symbol(symbol)
 

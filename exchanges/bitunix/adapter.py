@@ -205,6 +205,22 @@ class BitunixExchange(BaseExchange):
             return len(price_str.rstrip("0").split(".")[-1])
         return 4  # 保守預設
 
+    def get_funding_rate(self, symbol: str) -> float:
+        """
+        取得指定交易對的當前資金費率（統一回傳 decimal 格式，例如 0.0001 = 0.01%）。
+
+        注意：Bitunix API 回傳 % 格式（0.005 = 0.005%），需除以 100 轉為 decimal。
+        """
+        try:
+            data = self._client.futures_public.get_funding_rate(symbol)
+            if not data:
+                return 0.0
+            # Bitunix 回傳 % 格式（例如 0.005 = 0.005%），除以 100 轉為 decimal
+            rate = data.get("fundingRate", data.get("rate", 0))
+            return float(rate) / 100
+        except Exception:
+            return 0.0
+
     def get_tickers(self) -> list[dict]:
         """取得所有合約 ticker，正規化為 BaseExchange 標準格式"""
         raw = self._client.futures_public.get_tickers()

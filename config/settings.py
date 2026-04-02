@@ -23,6 +23,7 @@ _load_dotenv()
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 TG_BOT_TOKEN: str = os.environ.get("TG_BOT_TOKEN", "")
+TG_CHAT_ID: str = os.environ.get("TG_CHAT_ID", "")  # 接收開平倉通知的 chat id
 
 # ── Bitunix ───────────────────────────────────────────────────────────────────
 BITUNIX_API_KEY: str = os.environ.get("BITUNIX_API_KEY", "")

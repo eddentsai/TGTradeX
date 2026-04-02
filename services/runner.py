@@ -18,6 +18,8 @@ from services.position_sizer import PositionSizer, SizeResult
 from services.position_store import delete as pos_delete
 from services.position_store import load as pos_load
 from services.position_store import save as pos_save
+from services.notifier import TelegramNotifier
+from services.risk_guard import RiskGuard
 from services.strategies.base import ActivePosition, BaseStrategy, Signal
 from services.strategies.conservative import ConservativeStrategy
 
@@ -75,6 +77,14 @@ def _is_transient_error(e: Exception) -> bool:
     return False
 
 
+# 資金費率做多封鎖門檻（decimal 格式，0.0005 = 0.05% per period）
+# 超過此值代表多頭明顯擁擠（約為正常費率 5x），跳過 open_long 信號
+# Bitunix 正常費率約 0.005%（decimal 0.00005），觸發點在 0.05% 以上
+_FUNDING_RATE_LONG_BLOCK = 0.0005
+
+# 資金費率快取時間（秒）；費率每 8 小時更新一次，快取 4 小時足夠
+_FUNDING_CACHE_TTL = 14400
+
 _INTERVAL_SECONDS: dict[str, int] = {
     "1m": 60,
     "3m": 180,
@@ -125,6 +135,8 @@ class ServiceRunner:
         max_positions: int = 0,
         on_symbol_banned: callable = None,
         strategy: BaseStrategy | None = None,
+        notifier: TelegramNotifier | None = None,
+        risk_guard: RiskGuard | None = None,
     ) -> None:
         if sizer is None and fixed_qty is None:
             raise ValueError("必須提供 sizer 或 fixed_qty 其中之一")
@@ -138,7 +150,13 @@ class ServiceRunner:
         self._max_positions = max_positions
         self._on_symbol_banned = on_symbol_banned
         self._fixed_strategy = strategy  # 外部注入時固定使用；None = 自動切換
+        self._notifier = notifier
+        self._risk_guard = risk_guard
         self._interval_sec = _INTERVAL_SECONDS.get(interval, 900)
+
+        # 資金費率快取（避免每根 K 線都呼叫 API）
+        self._fr_cache: float = 0.0
+        self._fr_cache_time: float = 0.0
 
         self._active_pos: ActivePosition | None = None
         self._stop_event = threading.Event()
@@ -354,6 +372,7 @@ class ServiceRunner:
                     ),
                 ),
                 active_pos,
+                snap.close,
             )
             return None
 
@@ -458,7 +477,7 @@ class ServiceRunner:
         if signal.action in ("open_long", "open_short"):
             self._open_position(signal, snap, strategy_name)
         elif signal.action == "close":
-            self._close_position(signal, active_pos)
+            self._close_position(signal, active_pos, snap.close)
 
     def _open_position(
         self, signal: Signal, snap: IndicatorSnapshot, strategy_name: str
@@ -466,6 +485,23 @@ class ServiceRunner:
         if self._active_pos is not None:
             logger.warning(f"[{self._symbol}] 已有持倉，忽略開倉信號")
             return
+
+        # 風控守衛：今日連續/累計虧損超過閾值，禁止開新倉
+        if self._risk_guard is not None and not self._risk_guard.is_open_allowed():
+            logger.info(
+                f"[{self._symbol}] 風控暫停開倉  {self._risk_guard.status}"
+            )
+            return
+
+        # 資金費率過濾：做多前確認多頭未過度擁擠
+        if signal.action == "open_long":
+            fr = self._get_funding_rate_cached()
+            if fr > _FUNDING_RATE_LONG_BLOCK:
+                logger.info(
+                    f"[{self._symbol}] 資金費率過高 ({fr:.4f} > {_FUNDING_RATE_LONG_BLOCK})，"
+                    f"跳過做多"
+                )
+                return
 
         # 檢查全域持倉上限
         if self._max_positions > 0:
@@ -541,6 +577,19 @@ class ServiceRunner:
             f"SL={sl:.4f} TP={tp:.4f} qty={qty}"
         )
 
+        if self._notifier is not None:
+            self._notifier.notify_open(
+                symbol=self._symbol,
+                side=side,
+                entry=entry,
+                sl=sl,
+                tp=tp,
+                strategy=strategy_name,
+                qty=qty,
+                interval=self._interval,
+                exchange=self._exchange.name,
+            )
+
     def _resolve_qty(
         self,
         snap: IndicatorSnapshot,
@@ -575,8 +624,23 @@ class ServiceRunner:
         # 使用固定數量
         return self._fixed_qty, None
 
+    def _get_funding_rate_cached(self) -> float:
+        """取得資金費率（快取 4 小時，費率每 8 小時才更新一次）"""
+        now = time.time()
+        if now - self._fr_cache_time < _FUNDING_CACHE_TTL:
+            return self._fr_cache
+        fr = self._exchange.get_funding_rate(self._symbol)
+        self._fr_cache = fr
+        self._fr_cache_time = now
+        if fr != 0.0:
+            logger.debug(f"[{self._symbol}] 資金費率更新: {fr:.5f} ({fr*100:.3f}%)")
+        return fr
+
     def _close_position(
-        self, signal: Signal, active_pos: ActivePosition | None
+        self,
+        signal: Signal,
+        active_pos: ActivePosition | None,
+        close_price: float = 0.0,
     ) -> None:
         if active_pos is None:
             return
@@ -617,5 +681,24 @@ class ServiceRunner:
             f"[{self._symbol}] 平倉成功 orderId={result.get('orderId')}  "
             f"理由={signal.reason}"
         )
+
+        # 通知 + 風控記錄
+        entry = active_pos.entry_price
+        side  = active_pos.side
+        if self._notifier is not None and close_price > 0:
+            self._notifier.notify_close(
+                symbol=self._symbol,
+                reason=signal.reason,
+                entry=entry,
+                close=close_price,
+                side=side,
+                exchange=self._exchange.name,
+            )
+        if self._risk_guard is not None and close_price > 0 and entry > 0:
+            pnl_pct = (close_price - entry) / entry * 100
+            if side != "BUY":
+                pnl_pct = -pnl_pct
+            self._risk_guard.record_trade(pnl_pct)
+
         self._active_pos = None
         pos_delete(self._exchange.name, self._symbol)
