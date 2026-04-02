@@ -135,15 +135,46 @@ class BitunixExchange(BaseExchange):
     def get_klines(self, symbol: str, interval: str, limit: int = 250) -> list[dict[str, Any]]:
         """
         回傳由舊到新的 K 線列表。
-        Bitunix 欄位：time, open, high, low, close, volume
+        Bitunix 每次最多回傳 200 根，超過時自動分段往前取。
         """
-        result = self._client.futures_public.get_kline(
-            symbol=symbol, interval=interval, limit=limit
-        )
-        # 確保由舊到新（有些交易所回傳由新到舊）
-        if len(result) >= 2:
-            if result[0].get("time", 0) > result[-1].get("time", 0):
-                result = list(reversed(result))
+        _BITUNIX_MAX = 200
+        if limit <= _BITUNIX_MAX:
+            result = self._client.futures_public.get_kline(
+                symbol=symbol, interval=interval, limit=limit
+            )
+        else:
+            # 分段往前取：先取最新一批，再用最早的 time 往前繼續取
+            all_candles: list[dict] = []
+            end_time: int | None = None
+            while len(all_candles) < limit:
+                batch = self._client.futures_public.get_kline(
+                    symbol=symbol,
+                    interval=interval,
+                    limit=_BITUNIX_MAX,
+                    end_time=end_time,
+                )
+                if not batch:
+                    break
+                # Bitunix 回傳由新到舊（降序），先確認方向
+                is_desc = (
+                    len(batch) >= 2
+                    and int(batch[0].get("time", 0)) > int(batch[-1].get("time", 0))
+                )
+                # 最舊的那根用來設定下一頁的 endTime
+                oldest_time = int(batch[-1].get("time", 0) if is_desc else batch[0].get("time", 0))
+                # 轉為由舊到新後，prepend 到累積結果
+                if is_desc:
+                    batch = list(reversed(batch))
+                all_candles = batch + all_candles
+                if end_time is not None and oldest_time >= end_time:
+                    break  # 沒有更舊的資料了
+                end_time = oldest_time - 1
+
+            result = all_candles[-limit:]  # 只保留最近 limit 根
+
+        # 確保由舊到新
+        if len(result) >= 2 and result[0].get("time", 0) > result[-1].get("time", 0):
+            result = list(reversed(result))
         return result
 
     def _get_pair_info(self, symbol: str) -> dict:

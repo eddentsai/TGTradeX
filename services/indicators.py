@@ -85,7 +85,7 @@ def candles_from_raw(data: list[dict]) -> list[Candle]:
                 high=float(d.get("high", d.get("h", 0))),
                 low=float(d.get("low", d.get("l", 0))),
                 close=float(d.get("close", d.get("c", 0))),
-                volume=float(d.get("volume", d.get("v", 0))),
+                volume=float(d.get("volume", d.get("v", d.get("quoteVol", 0)))),
             )
         )
     return result
