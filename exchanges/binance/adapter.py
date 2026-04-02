@@ -376,6 +376,7 @@ class BinanceExchange(BaseExchange):
                     "base_vol":   float(t.get("volume", 0) or 0),
                     "high":       float(t.get("highPrice", 0) or 0),
                     "low":        float(t.get("lowPrice", 0) or 0),
+                    "change_pct": float(t.get("priceChangePercent", 0) or 0),
                 })
             except (TypeError, ValueError):
                 continue

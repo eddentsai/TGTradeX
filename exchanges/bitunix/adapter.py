@@ -180,13 +180,20 @@ class BitunixExchange(BaseExchange):
         result = []
         for t in raw:
             try:
+                open_price = float(t.get("open", 0) or 0)
+                last_price = float(t.get("lastPrice", 0) or 0)
+                change_pct = (
+                    (last_price - open_price) / open_price * 100
+                    if open_price > 0 else 0.0
+                )
                 result.append({
                     "symbol":     str(t.get("symbol", "")),
-                    "last_price": float(t.get("lastPrice", 0) or 0),
+                    "last_price": last_price,
                     "quote_vol":  float(t.get("quoteVol", 0) or 0),
                     "base_vol":   float(t.get("baseVol", 0) or 0),
                     "high":       float(t.get("high", 0) or 0),
                     "low":        float(t.get("low", 0) or 0),
+                    "change_pct": change_pct,
                 })
             except (TypeError, ValueError):
                 continue

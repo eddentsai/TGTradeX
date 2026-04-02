@@ -49,6 +49,7 @@ _MAINSTREAM_SYMBOLS: frozenset[str] = frozenset(
         "XAGUSDT",
         "XAUUSDT",
         "XAUTUSDT",
+        "PAXGUSDT",   # 黃金掛鉤代幣，同 XAU 性質
     }
 )
 
@@ -70,9 +71,11 @@ class SymbolScanner:
     """
     Args:
         exchange:           已初始化的交易所客戶端
-        min_quote_vol:      24h 最低 USDT 成交量門檻（預設 Binance=5億, Bitunix=1億）
+        min_quote_vol:      24h 最低 USDT 成交量門檻
         top_n:              最多回傳幾個候選幣種（0 = 不限）
         exclude_mainstream: 是否排除主流幣（預設 True）
+        max_change_pct:     24h 漲跌幅絕對值上限（預設 40%）；
+                            超過此值表示近期出現異常行情，K 線形態已失真，排除
     """
 
     def __init__(
@@ -81,11 +84,13 @@ class SymbolScanner:
         min_quote_vol: float = 100_000_000,
         top_n: int = 0,
         exclude_mainstream: bool = True,
+        max_change_pct: float = 40.0,
     ) -> None:
         self._exchange = exchange
         self._min_quote_vol = min_quote_vol
         self._top_n = top_n
         self._exclude_mainstream = exclude_mainstream
+        self._max_change_pct = max_change_pct
 
     def scan(self, held_symbols: set[str] | None = None) -> list[str]:
         """
@@ -106,6 +111,7 @@ class SymbolScanner:
             return list(held)
 
         candidates = []
+        skipped_volatile = []
         for t in tickers:
             sym = t.get("symbol", "")
             if not _is_valid_symbol(sym, self._exclude_mainstream):
@@ -113,7 +119,18 @@ class SymbolScanner:
             vol = t.get("quote_vol", 0) or 0
             if vol < self._min_quote_vol and sym not in held:
                 continue
+            # 排除近期異常行情：漲跌幅過大代表 K 線形態已失真
+            change_pct = t.get("change_pct", 0) or 0
+            if sym not in held and abs(change_pct) > self._max_change_pct:
+                skipped_volatile.append(f"{sym}({change_pct:+.1f}%)")
+                continue
             candidates.append((sym, vol))
+
+        if skipped_volatile:
+            logger.info(
+                f"[Scanner] 排除異常行情幣種（|漲跌|>{self._max_change_pct:.0f}%）: "
+                + ", ".join(skipped_volatile)
+            )
 
         # 按成交量降序
         candidates.sort(key=lambda x: x[1], reverse=True)

@@ -81,4 +81,5 @@ class BaseExchange(ABC):
           base_vol   : float 24h 標的資產成交量
           high       : float 24h 最高價
           low        : float 24h 最低價
+          change_pct : float 24h 漲跌幅（%），例如 3.5 代表 +3.5%
         """

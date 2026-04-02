@@ -36,7 +36,7 @@ logging.basicConfig(
 
 # 各交易所預設最低 24h 成交量門檻（USDT）
 _DEFAULT_MIN_VOLUME: dict[str, float] = {
-    "binance": 500_000_000,   # 5 億
+    "binance": 200_000_000,   # 2 億（山寨幣適用，可篩出 50+ 個活躍合約）
     "bitunix": 100_000_000,   # 1 億
 }
 
@@ -55,6 +55,20 @@ def _build_exchange(name: str):
             secret_key=settings.BINANCE_SECRET_KEY,
         )
     raise ValueError(f"不支援的交易所: {name}")
+
+
+def _build_scan_exchange(name: str | None, trade_exchange):
+    """
+    建立掃描用的交易所實例。
+    - name=None：直接用交易用的 exchange（預設）
+    - name="binance"：用 Binance 公開 ticker（不需要 API key）
+    """
+    if name is None or name == trade_exchange.name:
+        return trade_exchange
+    if name == "binance":
+        from exchanges.binance.adapter import BinanceExchange
+        return BinanceExchange(api_key="", secret_key="")
+    raise ValueError(f"不支援的掃描交易所: {name}")
 
 
 def main() -> None:
@@ -100,6 +114,13 @@ def main() -> None:
         "--include-mainstream", action="store_true",
         help="納入主流幣（BTC/ETH/BNB/SOL 等），預設排除",
     )
+    parser.add_argument(
+        "--scan-exchange",
+        default="binance",
+        choices=["binance"],
+        help="用指定交易所的成交量來掃描幣種（預設 binance）；"
+             "Binance 成交量較大且更接近市場真實流動性，建議保持預設",
+    )
     args = parser.parse_args()
 
     if args.leverage < 1 or args.leverage > 125:
@@ -109,11 +130,16 @@ def main() -> None:
 
     settings.validate(exchange=args.exchange)
 
-    min_volume = args.min_volume or _DEFAULT_MIN_VOLUME[args.exchange]
+    min_volume = args.min_volume or _DEFAULT_MIN_VOLUME.get(
+        args.scan_exchange or args.exchange,
+        _DEFAULT_MIN_VOLUME[args.exchange],
+    )
 
     log = logging.getLogger(__name__)
+    scan_label = args.scan_exchange or args.exchange
     log.info(
         f"自動掃描模式啟動  exchange={args.exchange} "
+        f"scan_exchange={scan_label} "
         f"max_positions={args.max_positions} "
         f"min_volume={min_volume:,.0f} USDT "
         f"scan_interval={args.scan_interval}s "
@@ -121,9 +147,10 @@ def main() -> None:
     )
 
     exchange = _build_exchange(args.exchange)
+    scan_exchange = _build_scan_exchange(args.scan_exchange, exchange)
 
     scanner = SymbolScanner(
-        exchange=exchange,
+        exchange=scan_exchange,
         min_quote_vol=min_volume,
         top_n=args.max_positions * 3,  # 候選池為最大持倉的 3 倍，留有餘裕
         exclude_mainstream=not args.include_mainstream,
