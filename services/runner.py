@@ -44,6 +44,15 @@ def _is_symbol_banned_error(e: Exception) -> bool:
     )
 
 
+def _is_margin_error(e: Exception) -> bool:
+    """
+    判斷是否為保證金不足錯誤（Binance -2019）。
+    不應重試，也不是 banned，只需跳過本次開倉並記錄 warning。
+    """
+    msg = str(e)
+    return "-2019" in msg or "margin is insufficient" in msg.lower()
+
+
 def _is_transient_error(e: Exception) -> bool:
     """
     判斷是否為可重試的暫時性網路錯誤。
@@ -557,7 +566,18 @@ class ServiceRunner:
             )
             return
 
-        result = self._exchange.place_order(payload)
+        try:
+            result = self._exchange.place_order(payload)
+        except Exception as e:
+            if _is_margin_error(e):
+                required_margin = round(float(qty) * entry / (self._sizer.leverage if self._sizer else 1), 2)
+                logger.warning(
+                    f"[{self._symbol}] 保證金不足，跳過本次開倉  "
+                    f"（預估需要 {required_margin}U 保證金，"
+                    f"請降低 --risk-pct 或增加帳戶餘額）"
+                )
+                return
+            raise
         logger.info(f"[{self._symbol}] 開倉送出 orderId={result.get('orderId')}")
 
         self._active_pos = ActivePosition(

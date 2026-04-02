@@ -55,7 +55,7 @@ class PositionSizer:
     Args:
         leverage:          槓桿倍數（預設 4）
         risk_pct:          每次最大風險比例（預設 0.01 = 1%）
-        max_position_pct:  帳戶最大動用比例（預設 0.80 = 80%，防止過度集中）
+        max_position_pct:  帳戶最大動用比例（預設 0.60 = 60%，為交易所費用與資金費率留緩衝）
         qty_precision:     數量小數位數（預設 3，BTC 為 0.001）
         mm_rate:           維持保證金率（預設 0.5%）
         min_sl_buffer_pct: 止損距清算價最低緩衝（預設 15%）
@@ -65,7 +65,7 @@ class PositionSizer:
         self,
         leverage: int = 4,
         risk_pct: float = 0.01,
-        max_position_pct: float = 0.80,
+        max_position_pct: float = 0.60,
         qty_precision: int = 3,
         mm_rate: float = _DEFAULT_MM_RATE,
         min_sl_buffer_pct: float = 0.15,
