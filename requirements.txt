@@ -3,3 +3,4 @@ websocket-client>=1.7
 python-telegram-bot>=20.0
 python-dotenv>=1.0
 binance-sdk-derivatives-trading-usds-futures>=9.1.0
+redis>=4.0

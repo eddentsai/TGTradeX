@@ -70,12 +70,14 @@ def _is_valid_symbol(symbol: str, exclude_mainstream: bool = True) -> bool:
 class SymbolScanner:
     """
     Args:
-        exchange:           已初始化的交易所客戶端
-        min_quote_vol:      24h 最低 USDT 成交量門檻
+        exchange:           用來取成交量排名的交易所（建議用 Binance，流動性數據更準）
+        min_quote_vol:      24h 最低 USDT 成交量門檻（以 exchange 的數據為準）
         top_n:              最多回傳幾個候選幣種（0 = 不限）
         exclude_mainstream: 是否排除主流幣（預設 True）
         max_change_pct:     24h 漲跌幅絕對值上限（預設 40%）；
                             超過此值表示近期出現異常行情，K 線形態已失真，排除
+        trade_exchange:     實際下單用的交易所；若與 exchange 不同，
+                            掃描結果會過濾為兩邊都有上市的交集
     """
 
     def __init__(
@@ -85,12 +87,19 @@ class SymbolScanner:
         top_n: int = 0,
         exclude_mainstream: bool = True,
         max_change_pct: float = 40.0,
+        trade_exchange: BaseExchange | None = None,
     ) -> None:
         self._exchange = exchange
         self._min_quote_vol = min_quote_vol
         self._top_n = top_n
         self._exclude_mainstream = exclude_mainstream
         self._max_change_pct = max_change_pct
+        # 只有在掃描交易所與下單交易所不同時才需要取交集
+        self._trade_exchange = (
+            trade_exchange
+            if trade_exchange is not None and trade_exchange is not exchange
+            else None
+        )
 
     def scan(self, held_symbols: set[str] | None = None) -> list[str]:
         """
@@ -110,11 +119,28 @@ class SymbolScanner:
             logger.error(f"[Scanner] 取得 ticker 失敗: {e}")
             return list(held)
 
+        # 若指定了下單交易所，先取得它的可用幣種集合，過濾為交集
+        trade_symbols: set[str] | None = None
+        if self._trade_exchange is not None:
+            try:
+                trade_tickers = self._trade_exchange.get_tickers()
+                trade_symbols = {t.get("symbol", "") for t in trade_tickers}
+                logger.debug(
+                    f"[Scanner] {self._trade_exchange.name} 可用合約數: {len(trade_symbols)}"
+                )
+            except Exception as e:
+                logger.warning(f"[Scanner] 取得 {self._trade_exchange.name} 合約清單失敗，略過交集過濾: {e}")
+
         candidates = []
         skipped_volatile = []
+        skipped_no_market = 0
         for t in tickers:
             sym = t.get("symbol", "")
             if not _is_valid_symbol(sym, self._exclude_mainstream):
+                continue
+            # 下單交易所沒有此合約，跳過
+            if trade_symbols is not None and sym not in held and sym not in trade_symbols:
+                skipped_no_market += 1
                 continue
             vol = t.get("quote_vol", 0) or 0
             if vol < self._min_quote_vol and sym not in held:
@@ -126,6 +152,8 @@ class SymbolScanner:
                 continue
             candidates.append((sym, vol))
 
+        if skipped_no_market:
+            logger.info(f"[Scanner] 排除 {skipped_no_market} 個 {self._trade_exchange.name} 未上市的合約")
         if skipped_volatile:
             logger.info(
                 f"[Scanner] 排除異常行情幣種（|漲跌|>{self._max_change_pct:.0f}%）: "

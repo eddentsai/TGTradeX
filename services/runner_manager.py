@@ -20,18 +20,17 @@ from typing import TYPE_CHECKING
 from exchanges.base import BaseExchange
 from services.position_sizer import PositionSizer
 from services.runner import ServiceRunner
-from services.strategies.ensemble import EnsembleStrategy  # ← 改成 import
+from services.strategies.ensemble import EnsembleStrategy
 from services.symbol_scanner import SymbolScanner
 
 if TYPE_CHECKING:
-    from services.strategies.base import (
-        ActivePosition,
-        BaseStrategy,
-        IndicatorSnapshot,
-        Signal,
-    )
+    from services.strategies.base import BaseStrategy
 
 logger = logging.getLogger(__name__)
+
+# Redis key：每個交易所各自一個 set，避免 binance/bitunix 黑名單互相污染
+def _redis_key(exchange_name: str) -> str:
+    return f"tgtraderx:invalid_symbols:{exchange_name}"
 
 
 class RunnerManager:
@@ -47,6 +46,8 @@ class RunnerManager:
         enable_ensemble:        True = 啟用 Ensemble 多策略確認模式
         ensemble_strategies:    Ensemble 模式下使用的策略清單（需 enable_ensemble=True）
         ensemble_min_confirm:   Ensemble 開倉所需最少確認策略數（預設 2）
+        redis_url:              Redis 連線字串（預設 redis://localhost:6379/0）；
+                                None = 停用持久化，黑名單只存記憶體
     """
 
     def __init__(
@@ -61,6 +62,7 @@ class RunnerManager:
         enable_ensemble: bool = False,
         ensemble_strategies: "list[BaseStrategy] | None" = None,
         ensemble_min_confirm: int = 2,
+        redis_url: str | None = "redis://localhost:6379/0",
     ) -> None:
         self._exchange = exchange
         self._scanner = scanner
@@ -80,7 +82,49 @@ class RunnerManager:
         self._lock = threading.Lock()
         self._stop_ev = threading.Event()
 
-        self._invalid_symbols: set[str] = set()
+        # 黑名單：從 Redis 載入（若可用），否則只用記憶體
+        self._redis = self._connect_redis(redis_url)
+        self._redis_key = _redis_key(exchange.name)
+        self._invalid_symbols: set[str] = self._load_blacklist()
+
+    # ── Redis 輔助 ────────────────────────────────────────────────────────────
+
+    def _connect_redis(self, url: str | None):
+        """嘗試連線 Redis；失敗或 url=None 時回傳 None（退回記憶體模式）"""
+        if url is None:
+            logger.info("[Manager] Redis 停用，黑名單只存記憶體")
+            return None
+        try:
+            import redis
+            client = redis.from_url(url, socket_connect_timeout=2, decode_responses=True)
+            client.ping()
+            logger.info(f"[Manager] Redis 連線成功: {url}")
+            return client
+        except Exception as e:
+            logger.warning(f"[Manager] Redis 連線失敗，退回記憶體模式: {e}")
+            return None
+
+    def _load_blacklist(self) -> set[str]:
+        """從 Redis 載入黑名單；Redis 不可用時回傳空集合"""
+        if self._redis is None:
+            return set()
+        try:
+            symbols = self._redis.smembers(self._redis_key)
+            if symbols:
+                logger.info(f"[Manager] 從 Redis 載入黑名單 ({len(symbols)} 個): {sorted(symbols)}")
+            return set(symbols)
+        except Exception as e:
+            logger.warning(f"[Manager] 讀取 Redis 黑名單失敗: {e}")
+            return set()
+
+    def _persist_ban(self, symbol: str) -> None:
+        """將單一幣種寫入 Redis 黑名單"""
+        if self._redis is None:
+            return
+        try:
+            self._redis.sadd(self._redis_key, symbol)
+        except Exception as e:
+            logger.warning(f"[Manager] 寫入 Redis 黑名單失敗 ({symbol}): {e}")
 
     # ── 公開介面 ──────────────────────────────────────────────────────────────
 
@@ -170,6 +214,7 @@ class RunnerManager:
         except Exception as e:
             logger.warning(f"[Manager] 無法取得 {symbol} 數量精度，加入黑名單: {e}")
             self._invalid_symbols.add(symbol)
+            self._persist_ban(symbol)
             return
 
         sizer = PositionSizer(
@@ -213,6 +258,7 @@ class RunnerManager:
     def _ban_symbol(self, symbol: str) -> None:
         """runner 回呼：將幣種加入永久黑名單並移除 runner"""
         self._invalid_symbols.add(symbol)
+        self._persist_ban(symbol)
         logger.warning(f"[Manager] {symbol} 加入黑名單（不支援 API 交易）")
         with self._lock:
             self._stop_symbol(symbol)

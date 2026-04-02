@@ -111,6 +111,11 @@ def main() -> None:
         help="模擬模式：只記錄信號，不實際下單",
     )
     parser.add_argument(
+        "--redis-url",
+        default=settings.REDIS_URL,
+        help=f"Redis 連線字串，用於黑名單持久化（預設: {settings.REDIS_URL}）；傳入空字串停用",
+    )
+    parser.add_argument(
         "--include-mainstream", action="store_true",
         help="納入主流幣（BTC/ETH/BNB/SOL 等），預設排除",
     )
@@ -154,6 +159,7 @@ def main() -> None:
         min_quote_vol=min_volume,
         top_n=args.max_positions * 3,  # 候選池為最大持倉的 3 倍，留有餘裕
         exclude_mainstream=not args.include_mainstream,
+        trade_exchange=exchange,
     )
 
     # qty_precision 由 RunnerManager 對每個幣種單獨查詢
@@ -172,6 +178,7 @@ def main() -> None:
         max_positions=args.max_positions,
         scan_interval=args.scan_interval,
         dry_run=args.dry_run,
+        redis_url=args.redis_url or None,
     )
 
     # 處理 Ctrl-C / SIGTERM

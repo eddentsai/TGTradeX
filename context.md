@@ -8,9 +8,10 @@
 
 提供三種期貨交易自動化模式：
 
-1. **自動掃描交易服務**（`run_auto.py`）：自動從交易所掃描高流動性合約，動態啟動多個 runner 同時監控，依全域持倉上限控制開倉數量
-2. **單一幣種自動服務**（`run_service.py`）：固定監控指定幣種，自動識別市場狀態、切換策略、計算倉位並下單
-3. **Telegram Bot**（`main.py`）：接收使用者文字指令，手動控制開平倉
+1. **Ensemble 多策略掃描服務**（`run_mix_strategies.py`）：自動掃描高流動性山寨幣，三策略多數決開倉，推薦用於山寨幣交易
+2. **自動掃描交易服務**（`run_auto.py`）：自動掃描並依市場狀態自動切換策略，適合市場狀態較明確時
+3. **單一幣種自動服務**（`run_service.py`）：固定監控指定幣種，自動識別市場狀態、切換策略、計算倉位並下單
+4. **Telegram Bot**（`main.py`）：接收使用者文字指令，手動控制開平倉
 
 三者共用 `exchanges/` 層，互不干擾，可同時運行。
 
@@ -35,7 +36,7 @@
 | `place_sl_tp_orders(symbol, side, qty, sl_price, tp_price, position_id?)` | 對現有倉位補掛 SL/TP |
 | `get_klines(symbol, interval, limit)` | K 線資料（由舊到新） |
 | `get_qty_precision(symbol)` | 數量小數位數 |
-| `get_tickers()` | 所有合約行情摘要（正規化欄位：`symbol`, `last_price`, `quote_vol`, `base_vol`, `high`, `low`）|
+| `get_tickers()` | 所有合約行情摘要（正規化欄位：`symbol`, `last_price`, `quote_vol`, `base_vol`, `high`, `low`, `change_pct`）|
 
 **`exchanges/bitunix/`**
 
@@ -70,13 +71,31 @@
 
 `SymbolScanner` 從交易所取得所有合約 24h ticker，過濾出適合監控的交易對。
 
+建構參數：
+- `exchange`：取成交量排名用的交易所（建議 Binance，流動性數據更準）
+- `trade_exchange`：實際下單用的交易所；若與 `exchange` 不同，掃描結果自動取兩邊的**上市交集**，避免掃到下單交易所沒有的合約
+- `min_quote_vol`：24h 最低 USDT 成交量門檻
+- `max_change_pct`：24h 漲跌幅絕對值上限（預設 40%）；超過此值表示近期出現異常行情（例如上幣炒作或崩盤），K 線形態已失真，排除
+
 過濾規則（依序）：
 1. 必須以 `USDT` 結尾
 2. 排除穩定幣對（USDC、BUSD、TUSD、DAI 等）
 3. 排除槓桿代幣（UP/DOWN/BULL/BEAR/3L/3S 等結尾）
-4. 排除主流幣黑名單（BTC/ETH/BNB/SOL/XRP/ADA/DOGE/AVAX/DOT/LTC/LINK/UNI/ATOM 等，`exclude_mainstream=True` 時生效）
-5. 24h USDT 成交量 ≥ `min_quote_vol`（已持倉幣種無條件保留，不受此限）
-6. 按成交量降序，回傳前 `top_n` 個（0 = 不限）
+4. 排除主流幣黑名單（BTC/ETH/BNB/SOL/XRP/ADA/DOGE/AVAX/DOT/LTC/LINK/UNI/ATOM/PAXG/XAU/XAG 等，`exclude_mainstream=True` 時生效）
+5. 若指定 `trade_exchange`，排除 `trade_exchange` 未上市的合約
+6. 24h USDT 成交量 ≥ `min_quote_vol`（已持倉幣種無條件保留）
+7. 排除 24h 漲跌幅絕對值 > `max_change_pct` 的幣種（已持倉幣種不受此限）
+8. 按成交量降序，回傳前 `top_n` 個（0 = 不限）
+
+**典型用法（Bitunix 下單 + Binance 排名）**：
+```python
+scanner = SymbolScanner(
+    exchange=binance_exchange,      # 用 Binance 成交量排名
+    trade_exchange=bitunix_exchange,  # 只保留 Bitunix 有上市的
+    min_quote_vol=200_000_000,      # Binance 2 億門檻
+    max_change_pct=40.0,
+)
+```
 
 **`services/runner_manager.py`**
 
@@ -86,9 +105,25 @@
 - 定期（`scan_interval` 秒）呼叫 `SymbolScanner` 取得候選列表
 - 候選幣種全部啟動 runner 監控；退出候選且無持倉的幣種停止 runner
 - 每個 runner 開倉前自行查詢全域持倉數，達上限時跳過（`max_positions` 在 runner 層強制）
-- 維護 `_invalid_symbols` 永久黑名單：
-  - `get_qty_precision` 失敗（交易所不存在該合約）→ 直接加入黑名單
-  - runner 回報 `[710002]` 不支援 API 交易 → 透過 `on_symbol_banned` 回呼加入黑名單
+- 維護 `_invalid_symbols` 永久黑名單，寫入來源：
+  - `get_qty_precision` 失敗（交易所不存在該合約）→ 直接加入
+  - runner 回報 `[710002]` 不支援 API 交易 → 透過 `on_symbol_banned` 回呼加入
+
+**Redis 黑名單持久化**：
+- 建構時傳入 `redis_url`（預設 `redis://localhost:6379/0`，可透過環境變數 `REDIS_URL` 覆寫）
+- 啟動時自動從 Redis 載入歷史黑名單（key：`tgtraderx:invalid_symbols:{exchange_name}`）
+- 每次新增黑名單時同步寫入 Redis，重啟後不再嘗試已知失效的合約
+- Redis 不可用時自動退回記憶體模式，不影響正常運行
+
+手動管理黑名單（Redis CLI）：
+```bash
+# 查看
+redis-cli smembers "tgtraderx:invalid_symbols:bitunix"
+# 新增（已知不支援 API 的合約）
+redis-cli sadd "tgtraderx:invalid_symbols:bitunix" ZECUSDT ALPHAUSDT EDGEUSDT
+# 移除（交易所後來新增了此合約）
+redis-cli srem "tgtraderx:invalid_symbols:bitunix" ZECUSDT
+```
 
 **`services/runner.py`**
 
@@ -186,7 +221,7 @@ required_margin = position_value ÷ leverage
 | `ConservativeStrategy` | DOWNTREND | 不入場 | 有倉位則平倉 |
 | `EnsembleStrategy` | 可選模式 | ≥ 2 個策略同時確認開倉；SL 取最高，TP 取最低（最保守）| 任一策略觸發出場即出場 |
 
-`ServiceRunner` 支援 `enable_ensemble=True` 參數，啟用時在入場判斷改用 `DipVolumeStrategy + VwapPocStrategy + FibonacciStrategy` 三策略多數決。
+`ServiceRunner` 透過 `strategy` 參數接受外部注入的策略實例（例如 `EnsembleStrategy`）；`strategy=None` 時根據市場狀態自動切換。`RunnerManager` 的 `_build_strategy()` 負責根據 `enable_ensemble` 決定傳入哪種策略。
 
 **`services/external_data/`**  ⚠️ *已實作，尚未整合進交易週期*
 
@@ -306,7 +341,7 @@ TGListener.reply_text() → Telegram 使用者
 4. 在 `run_auto.py` 和 `run_service.py` 的 `_build_exchange()` 加入 `elif name == "<name>"`
 5. 在 `main.py` 加入 `dispatcher.register(<Name>Exchange(...))`
 
-注意：`get_tickers()` 回傳格式必須正規化為 `symbol`, `last_price`, `quote_vol`, `base_vol`, `high`, `low`；`place_sl_tp_orders()` 在 Bitunix 需要 `position_id`，在 Binance 則不需要（傳空字串即可）。
+注意：`get_tickers()` 回傳格式必須正規化為 `symbol`, `last_price`, `quote_vol`, `base_vol`, `high`, `low`, `change_pct`（Binance 用 `priceChangePercent`；Bitunix 從 `open/lastPrice` 計算）；`place_sl_tp_orders()` 在 Bitunix 需要 `position_id`，在 Binance 則不需要（傳空字串即可）。
 
 ### 新增交易策略
 
@@ -330,10 +365,17 @@ TGListener.reply_text() → Telegram 使用者
 | `websocket-client` | Bitunix WebSocket | 1.7 |
 | `python-telegram-bot` | Telegram Bot | 20.0（asyncio 版）|
 | `python-dotenv` | 載入 .env 檔案 | 1.0 |
+| `redis` | 黑名單持久化（可選）| 4.0 |
 
 `services/` 層的技術指標計算只使用 Python 標準函式庫（無 numpy/pandas），減少部署依賴。
 
 > `python-telegram-bot` v20 起採用 asyncio 架構，與 v13 以前的 API 不相容。
+
+伺服器安裝 Redis：
+```bash
+sudo apt install redis-server -y
+sudo systemctl enable --now redis-server
+```
 
 ---
 
@@ -341,7 +383,7 @@ TGListener.reply_text() → Telegram 使用者
 
 - **外部數據未整合**：`MarketBiasCalculator`（資金費率、清算數據、多空比）已實作但尚未接入 `ServiceRunner._run_cycle()`。計畫作為開倉前的情緒過濾層（例如偏向分數 < -30 時禁止做多）。
 - **分批出場未實作**：`DipVolumeStrategy` 和 `VwapPocStrategy` 的分批平倉邏輯（半倉/全倉）待 `Signal` 新增 `quantity_pct` 欄位後再啟用，目前一律全倉出場。
-- **EnsembleStrategy 兩套實作並存**：`services/strategies/ensemble.py` 為完整的 `EnsembleStrategy` 類別；`ServiceRunner._get_ensemble_signal()` 為內聯版。目前 runner 使用內聯版，未來可統一改用類別版。
+- **Bitunix 山寨幣流動性偏低**：Bitunix 山寨幣成交量遠低於 Binance（第 8 名 TAO 僅約 5500 萬，同幣在 Binance 有 4.77 億）。建議永遠搭配 `--scan-exchange binance` 用 Binance 成交量排名，再取兩交易所上市的交集。
 - **未實作 WebSocket 確認成交**：目前 `place_order` 只確認訂單送出，不等待成交事件。`exchanges/bitunix/trading_flow.py` 有 `run_futures_trading_flow` 可做完整生命週期管理，未來可整合至 runner。
 - **position_id 延遲**：市價單填充後 position_id 需等下一週期才能從交易所取得。若需即時取得，可在開倉後加入短暫等待與即時查詢。
 - **清算價為估算值**：孤立保證金模式下的清算價因交易所計算細節（維持保證金率、手續費）可能有誤差，實際以交易所顯示為準。

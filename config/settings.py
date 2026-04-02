@@ -32,6 +32,9 @@ BITUNIX_SECRET_KEY: str = os.environ.get("BITUNIX_SECRET_KEY", "")
 BINANCE_API_KEY: str = os.environ.get("BINANCE_API_KEY", "")
 BINANCE_SECRET_KEY: str = os.environ.get("BINANCE_SECRET_KEY", "")
 
+# ── Redis（可選，用於黑名單持久化）────────────────────────────────────────────
+REDIS_URL: str = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+
 
 _EXCHANGE_KEYS: dict[str, tuple[str, str]] = {
     "bitunix": ("BITUNIX_API_KEY", "BITUNIX_SECRET_KEY"),
