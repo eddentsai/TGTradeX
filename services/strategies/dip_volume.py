@@ -23,7 +23,7 @@ from services.strategies.base import ActivePosition, BaseStrategy, Signal
 
 _TIME_WINDOW = 5  # 急跌監測窗口（根數）
 _DROP_THRESH = -3.0  # 跌幅閾值（%）
-_VOL_MULT = 3.0  # 成交量倍數
+_VOL_MULT = 2.0  # 成交量倍數（1h 週期用 2x，15m 以下可用 3x）
 _SL_PCT = 0.985  # 止損：-1.5%
 _TP_PCT = 1.030  # 止盈：+3.0%
 _MAX_HOLD = 10  # 時間止損（根數）

@@ -56,33 +56,30 @@ class VwapPocStrategy(BaseStrategy):
         if vwap is None or std is None:
             return Signal(action="hold", reason="VWAP 計算資料不足")
 
-        # POC 必須在 VWAP 上方
-        if poc <= vwap:
-            return Signal(
-                action="hold",
-                reason=f"POC={poc:.4f} 低於 VWAP={vwap:.4f}，無回歸目標",
-            )
-
         lower_band = vwap - self.entry_band * std
         stop_loss = vwap - self.stop_loss_band * std
 
         if close <= lower_band and rsi < 40:
             risk = abs(close - stop_loss)
-            reward = abs(poc - close)
 
             # BUG FIX #1：防止 risk == 0 導致 ZeroDivisionError
             if risk <= 0:
                 return Signal(action="hold", reason="止損距離為零，跳過")
 
+            # TP：取 POC 和 VWAP 中較近的一個作為目標；
+            # 下跌市中 POC 常低於 VWAP，不強制要求方向，只要 R:R 夠就進場
+            tp_candidate = max(poc, vwap)
+            reward = abs(tp_candidate - close)
+
             if reward / risk >= 1.5:
                 return Signal(
                     action="open_long",
                     stop_loss=stop_loss,
-                    take_profit=poc,
+                    take_profit=tp_candidate,
                     reason=(
                         f"VWAP 回歸 price={close:.4f} "
                         f"VWAP={vwap:.4f} lower_band={lower_band:.4f} "
-                        f"POC={poc:.4f} RSI={rsi:.1f} R:R={reward/risk:.2f}"
+                        f"POC={poc:.4f} TP={tp_candidate:.4f} RSI={rsi:.1f} R:R={reward/risk:.2f}"
                     ),
                 )
             return Signal(
