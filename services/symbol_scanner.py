@@ -35,21 +35,16 @@ _MAINSTREAM_SYMBOLS: frozenset[str] = frozenset(
     {
         "BTCUSDT",
         "ETHUSDT",
-        "BNBUSDT",
         "SOLUSDT",
-        "XRPUSDT",
         "ADAUSDT",
         "DOGEUSDT",
-        "AVAXUSDT",
         "DOTUSDT",
-        "LTCUSDT",
-        "LINKUSDT",
         "UNIUSDT",
-        "ATOMUSDT",
         "XAGUSDT",
         "XAUUSDT",
         "XAUTUSDT",
-        "PAXGUSDT",   # 黃金掛鉤代幣，同 XAU 性質
+        "PAXGUSDT",  # 黃金掛鉤代幣，同 XAU 性質
+        "CLUSDT",  # 石油掛鉤代幣
     }
 )
 
@@ -129,7 +124,9 @@ class SymbolScanner:
                     f"[Scanner] {self._trade_exchange.name} 可用合約數: {len(trade_symbols)}"
                 )
             except Exception as e:
-                logger.warning(f"[Scanner] 取得 {self._trade_exchange.name} 合約清單失敗，略過交集過濾: {e}")
+                logger.warning(
+                    f"[Scanner] 取得 {self._trade_exchange.name} 合約清單失敗，略過交集過濾: {e}"
+                )
 
         candidates = []
         skipped_volatile = []
@@ -139,7 +136,11 @@ class SymbolScanner:
             if not _is_valid_symbol(sym, self._exclude_mainstream):
                 continue
             # 下單交易所沒有此合約，跳過
-            if trade_symbols is not None and sym not in held and sym not in trade_symbols:
+            if (
+                trade_symbols is not None
+                and sym not in held
+                and sym not in trade_symbols
+            ):
                 skipped_no_market += 1
                 continue
             vol = t.get("quote_vol", 0) or 0
@@ -153,7 +154,9 @@ class SymbolScanner:
             candidates.append((sym, vol))
 
         if skipped_no_market:
-            logger.info(f"[Scanner] 排除 {skipped_no_market} 個 {self._trade_exchange.name} 未上市的合約")
+            logger.info(
+                f"[Scanner] 排除 {skipped_no_market} 個 {self._trade_exchange.name} 未上市的合約"
+            )
         if skipped_volatile:
             logger.info(
                 f"[Scanner] 排除異常行情幣種（|漲跌|>{self._max_change_pct:.0f}%）: "
