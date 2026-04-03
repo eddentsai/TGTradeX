@@ -18,7 +18,7 @@ NAMES=(btc eth sol bnb)
 SYMBOLS=(BTCUSDT ETHUSDT SOLUSDT BNBUSDT)
 DELAYS=(0 5 10 15)          # 錯開啟動秒數，避免同時打 API
 
-COMMON_ARGS="--exchange binance --leverage 3 --risk-pct 1 --interval 1h"
+COMMON_ARGS="--exchange binance --leverage 3 --risk-pct 1 --interval 4h"
 
 # ── 工具函式 ───────────────────────────────────────────────────────────────────
 

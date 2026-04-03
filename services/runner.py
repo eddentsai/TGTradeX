@@ -173,7 +173,7 @@ class ServiceRunner:
         # 自動切換模式的策略映射（_fixed_strategy 不為 None 時不使用）
         self._strategies: dict[MarketState, BaseStrategy] = {
             MarketState.UPTREND:         FibonacciStrategy(),
-            MarketState.DOWNTREND:       ConservativeStrategy(),
+            MarketState.DOWNTREND:       FibonacciStrategy(),
             MarketState.RANGING:         VwapPocStrategy(),
             MarketState.HIGH_VOLATILITY: DipVolumeStrategy(),
         }
