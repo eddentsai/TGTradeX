@@ -26,6 +26,8 @@ is_running() {
 }
 
 do_start() {
+    echo "  同步系統時鐘..."
+    sudo ntpdate -u pool.ntp.org 2>&1 | sed 's/^/  /'
     if is_running; then
         echo "  已在運行（PID=$(cat "$PID_FILE")），略過"
         return
@@ -33,7 +35,7 @@ do_start() {
 
     touch "$LOG_FILE"
     nohup python -u run_mix_strategies.py $SERVICE_ARGS \
-        >> "$LOG_FILE" 2>&1 &
+        > "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
     echo "  啟動（PID=$!  log=$LOG_FILE）"
 }

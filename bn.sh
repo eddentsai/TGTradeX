@@ -45,7 +45,7 @@ start_one() {
         $COMMON_ARGS \
         --symbol "$symbol" \
         --start-delay "$delay" \
-        >> "$lf" 2>&1 &
+        > "$lf" 2>&1 &
     echo $! > "$pf"
     echo "  [$symbol] 啟動（PID=$!  log=$lf）"
 }
@@ -70,6 +70,8 @@ stop_one() {
 }
 
 do_start() {
+    echo "  同步系統時鐘..."
+    sudo ntpdate -u pool.ntp.org 2>&1 | sed 's/^/  /'
     for i in "${!NAMES[@]}"; do
         start_one "${NAMES[$i]}" "${SYMBOLS[$i]}" "${DELAYS[$i]}"
     done

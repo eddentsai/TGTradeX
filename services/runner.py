@@ -70,6 +70,8 @@ def _is_transient_error(e: Exception) -> bool:
             "request too frequently",
             "10006",
             "rate limit",
+            "-1021",
+            "timestamp for this request",
         )
     ):
         return True
