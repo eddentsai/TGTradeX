@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 
 from exchanges.base import BaseExchange
 
@@ -83,12 +84,16 @@ class SymbolScanner:
         exclude_mainstream: bool = True,
         max_change_pct: float = 40.0,
         trade_exchange: BaseExchange | None = None,
+        volatile_cooldown_hours: float = 24.0,
     ) -> None:
         self._exchange = exchange
         self._min_quote_vol = min_quote_vol
         self._top_n = top_n
         self._exclude_mainstream = exclude_mainstream
         self._max_change_pct = max_change_pct
+        self._volatile_cooldown_secs = volatile_cooldown_hours * 3600
+        # symbol → 最後一次被異常行情排除的時間戳
+        self._volatile_banned: dict[str, float] = {}
         # 只有在掃描交易所與下單交易所不同時才需要取交集
         self._trade_exchange = (
             trade_exchange
@@ -128,8 +133,10 @@ class SymbolScanner:
                     f"[Scanner] 取得 {self._trade_exchange.name} 合約清單失敗，略過交集過濾: {e}"
                 )
 
+        now = time.time()
         candidates = []
         skipped_volatile = []
+        skipped_cooldown = []
         skipped_no_market = 0
         for t in tickers:
             sym = t.get("symbol", "")
@@ -150,7 +157,17 @@ class SymbolScanner:
             change_pct = t.get("change_pct", 0) or 0
             if sym not in held and abs(change_pct) > self._max_change_pct:
                 skipped_volatile.append(f"{sym}({change_pct:+.1f}%)")
+                self._volatile_banned[sym] = now  # 記錄排除時間
                 continue
+            # 冷卻期：曾因異常行情被排除，尚未冷卻完畢
+            if sym not in held and sym in self._volatile_banned:
+                elapsed = now - self._volatile_banned[sym]
+                if elapsed < self._volatile_cooldown_secs:
+                    remaining_h = (self._volatile_cooldown_secs - elapsed) / 3600
+                    skipped_cooldown.append(f"{sym}(剩{remaining_h:.1f}h)")
+                    continue
+                else:
+                    del self._volatile_banned[sym]  # 冷卻結束，解除
             candidates.append((sym, vol))
 
         if skipped_no_market:
@@ -161,6 +178,11 @@ class SymbolScanner:
             logger.info(
                 f"[Scanner] 排除異常行情幣種（|漲跌|>{self._max_change_pct:.0f}%）: "
                 + ", ".join(skipped_volatile)
+            )
+        if skipped_cooldown:
+            logger.info(
+                f"[Scanner] 冷卻中幣種（曾有異常行情，{self._volatile_cooldown_secs/3600:.0f}h 冷卻）: "
+                + ", ".join(skipped_cooldown)
             )
 
         # 按成交量降序
