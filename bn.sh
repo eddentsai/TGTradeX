@@ -70,8 +70,6 @@ stop_one() {
 }
 
 do_start() {
-    echo "  同步系統時鐘..."
-    sudo ntpdate -u pool.ntp.org 2>&1 | sed 's/^/  /'
     for i in "${!NAMES[@]}"; do
         start_one "${NAMES[$i]}" "${SYMBOLS[$i]}" "${DELAYS[$i]}"
     done

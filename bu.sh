@@ -26,8 +26,6 @@ is_running() {
 }
 
 do_start() {
-    echo "  同步系統時鐘..."
-    sudo ntpdate -u pool.ntp.org 2>&1 | sed 's/^/  /'
     if is_running; then
         echo "  已在運行（PID=$(cat "$PID_FILE")），略過"
         return
