@@ -74,55 +74,75 @@ class EnsembleStrategy(BaseStrategy):
     # ── 入場邏輯 ──────────────────────────────────────────────────────────────
 
     def _evaluate_entry(self, snap) -> Signal:
-        """需 min_confirm 個策略同時確認才開倉"""
-        open_votes: list[tuple[str, Signal]] = []
+        """需 min_confirm 個策略同時確認才開倉（多空分開計票）"""
+        long_votes:  list[tuple[str, Signal]] = []
+        short_votes: list[tuple[str, Signal]] = []
         hold_reasons: list[str] = []
 
         for strategy in self.strategies:
             sig = strategy.on_candle(snap, None)
             if sig.action == "open_long":
-                open_votes.append((strategy.name, sig))
-                logger.debug(f"[Ensemble] {strategy.name} 投票開倉: {sig.reason}")
+                long_votes.append((strategy.name, sig))
+                logger.debug(f"[Ensemble] {strategy.name} 投票做多: {sig.reason}")
+            elif sig.action == "open_short":
+                short_votes.append((strategy.name, sig))
+                logger.debug(f"[Ensemble] {strategy.name} 投票做空: {sig.reason}")
             else:
                 hold_reasons.append(f"{strategy.name}: {sig.reason}")
 
-        confirm_count = len(open_votes)
-
-        if confirm_count >= self.min_confirm:
-            # 最保守的 SL（最高）和 TP（最低）
-            sl_values = [
-                sig.stop_loss for _, sig in open_votes if sig.stop_loss is not None
-            ]
-            tp_values = [
-                sig.take_profit for _, sig in open_votes if sig.take_profit is not None
-            ]
-            best_sl = max(sl_values) if sl_values else None
-            best_tp = min(tp_values) if tp_values else None
-
-            confirmed_names = [name for name, _ in open_votes]
+        # ── 做多優先判斷 ────────────────────────────────────────────────────────
+        if len(long_votes) >= self.min_confirm:
+            sl_values = [s.stop_loss  for _, s in long_votes if s.stop_loss  is not None]
+            tp_values = [s.take_profit for _, s in long_votes if s.take_profit is not None]
+            best_sl = max(sl_values) if sl_values else None  # 最保守（最高）
+            best_tp = min(tp_values) if tp_values else None  # 最保守（最低）
+            confirmed = [n for n, _ in long_votes]
             logger.info(
-                f"[Ensemble] 開倉確認 {confirm_count}/{len(self.strategies)} "
-                f"策略: {', '.join(confirmed_names)}"
+                f"[Ensemble] 做多確認 {len(long_votes)}/{len(self.strategies)} "
+                f"策略: {', '.join(confirmed)}"
             )
             return Signal(
                 action="open_long",
                 stop_loss=best_sl,
                 take_profit=best_tp,
                 reason=(
-                    f"Ensemble {confirm_count}/{len(self.strategies)} 確認: "
-                    f"{', '.join(confirmed_names)}"
+                    f"Ensemble {len(long_votes)}/{len(self.strategies)} 確認: "
+                    f"{', '.join(confirmed)}"
                 ),
             )
 
-        # 確認數不足
+        # ── 做空判斷 ─────────────────────────────────────────────────────────
+        if len(short_votes) >= self.min_confirm:
+            sl_values = [s.stop_loss  for _, s in short_votes if s.stop_loss  is not None]
+            tp_values = [s.take_profit for _, s in short_votes if s.take_profit is not None]
+            best_sl = min(sl_values) if sl_values else None  # 做空最保守（最低止損）
+            best_tp = max(tp_values) if tp_values else None  # 做空最保守（最高止盈）
+            confirmed = [n for n, _ in short_votes]
+            logger.info(
+                f"[Ensemble] 做空確認 {len(short_votes)}/{len(self.strategies)} "
+                f"策略: {', '.join(confirmed)}"
+            )
+            return Signal(
+                action="open_short",
+                stop_loss=best_sl,
+                take_profit=best_tp,
+                reason=(
+                    f"Ensemble 做空 {len(short_votes)}/{len(self.strategies)} 確認: "
+                    f"{', '.join(confirmed)}"
+                ),
+            )
+
+        # ── 確認數不足 ────────────────────────────────────────────────────────
+        total_votes = len(long_votes) + len(short_votes)
+        all_reasons = hold_reasons + [f"{n}: 做多" for n, _ in long_votes] + [f"{n}: 做空" for n, _ in short_votes]
         logger.debug(
-            f"[Ensemble] 確認不足 {confirm_count}/{self.min_confirm} "
-            f"| {' ; '.join(hold_reasons)}"
+            f"[Ensemble] 確認不足 {total_votes}/{self.min_confirm} "
+            f"| {' ; '.join(all_reasons)}"
         )
         return Signal(
             action="hold",
             reason=(
-                f"Ensemble 確認不足 {confirm_count}/{self.min_confirm} "
+                f"Ensemble 確認不足 {total_votes}/{self.min_confirm} "
                 f"| {' ; '.join(hold_reasons)}"
             ),
         )

@@ -502,15 +502,20 @@ class ServiceRunner:
             )
             return
 
-        # 資金費率過濾：做多前確認多頭未過度擁擠
-        if signal.action == "open_long":
-            fr = self._get_funding_rate_cached()
-            if fr > _FUNDING_RATE_LONG_BLOCK:
-                logger.info(
-                    f"[{self._symbol}] 資金費率過高 ({fr:.4f} > {_FUNDING_RATE_LONG_BLOCK})，"
-                    f"跳過做多"
-                )
-                return
+        # 資金費率過濾：多頭費率過高跳過做多；空頭費率過負跳過做空
+        fr = self._get_funding_rate_cached()
+        if signal.action == "open_long" and fr > _FUNDING_RATE_LONG_BLOCK:
+            logger.info(
+                f"[{self._symbol}] 資金費率過高 ({fr:.4f} > {_FUNDING_RATE_LONG_BLOCK})，"
+                f"跳過做多"
+            )
+            return
+        if signal.action == "open_short" and fr < -_FUNDING_RATE_LONG_BLOCK:
+            logger.info(
+                f"[{self._symbol}] 資金費率過負 ({fr:.4f} < -{_FUNDING_RATE_LONG_BLOCK})，"
+                f"跳過做空（空頭過度擁擠）"
+            )
+            return
 
         # 檢查全域持倉上限
         if self._max_positions > 0:

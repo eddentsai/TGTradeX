@@ -1,17 +1,19 @@
 """
-斐波那契回調策略（上升趨勢使用）
+斐波那契回調策略（雙向）
 
-入場條件：
+做多入場條件：
   - 上升趨勢中（EMA20 > EMA50）
   - 找到有效波段（先漲後跌的結構，波幅 > 5%）
   - 價格回調至斐波那契關鍵位（0.618 / 0.5 / 0.382）
   - 出現錘子線反轉形態
+  - 止盈：前高，止損：0.786 回調位下方
 
-出場條件：
-  - 止盈：前高（100% 回測位）
-  - 止損：0.786 回調位下方
-
-注意：分批出場（1.0 / 1.272 / 1.618 延伸位）待 Signal 支援 quantity_pct 後再啟用。
+做空入場條件：
+  - 下降趨勢中（EMA20 < EMA50）
+  - 找到有效波段（先跌後反彈的結構，波幅 > 5%）
+  - 價格反彈至斐波那契關鍵位（0.382 / 0.5 / 0.618）
+  - 出現射擊之星拒絕形態
+  - 止盈：前低，止損：0.786 反彈位上方
 """
 
 from __future__ import annotations
@@ -61,71 +63,110 @@ class FibonacciStrategy(BaseStrategy):
         if ema20 is None or ema50 is None:
             return Signal(action="hold", reason="EMA 資料不足")
 
-        if ema20 <= ema50:
-            return Signal(
-                action="hold",
-                reason=f"非上升趨勢 EMA20={ema20:.4f} <= EMA50={ema50:.4f}",
-            )
+        # ── 做多：上升趨勢 ──────────────────────────────────────────────────────
+        if ema20 > ema50:
+            swing = self._find_swing_high_low(snap.klines)
+            if swing is None:
+                return Signal(action="hold", reason="無法識別有效波段高低點")
 
-        swing = self._find_swing_points(snap.klines)
+            high, low = swing
+            fib_levels = self._calculate_fib_levels(high, low)
+
+            for fib_key in _ENTRY_FIBS:
+                fib_price = fib_levels[f"retrace_{fib_key}"]
+                if abs(close - fib_price) / fib_price <= _CONFLUENCE_TOL:
+                    if self._check_reversal_confirmation(snap.klines, fib_price):
+                        stop_loss = fib_levels["retrace_786"]
+                        take_profit = high
+                        return Signal(
+                            action="open_long",
+                            stop_loss=stop_loss,
+                            take_profit=take_profit,
+                            reason=(
+                                f"斐波那契 {fib_key/1000:.3f} 回調 "
+                                f"price={close:.4f} fib={fib_price:.4f} "
+                                f"high={high:.4f} low={low:.4f} "
+                                f"SL={stop_loss:.4f} TP={take_profit:.4f}"
+                            ),
+                        )
+            return Signal(action="hold", reason="未在斐波那契關鍵位或無反轉確認")
+
+        # ── 做空：下降趨勢 ──────────────────────────────────────────────────────
+        swing = self._find_swing_low_high(snap.klines)
         if swing is None:
-            return Signal(action="hold", reason="無法識別有效波段高低點")
+            return Signal(action="hold", reason="非上升趨勢 EMA20={:.4f} <= EMA50={:.4f}".format(ema20, ema50))
 
-        high, low = swing
+        low, high = swing
         fib_levels = self._calculate_fib_levels(high, low)
 
         for fib_key in _ENTRY_FIBS:
             fib_price = fib_levels[f"retrace_{fib_key}"]
-
             if abs(close - fib_price) / fib_price <= _CONFLUENCE_TOL:
-                # BUG FIX #2：確保有足夠 K 線才做反轉確認
-                if self._check_reversal_confirmation(snap.klines, fib_price):
-                    stop_loss = fib_levels["retrace_786"]
-                    take_profit = high
-
+                if self._check_short_reversal_confirmation(snap.klines, fib_price):
+                    stop_loss = fib_levels["retrace_786"]  # 反彈 0.786 以上止損
+                    take_profit = low                       # 目標前低
                     return Signal(
-                        action="open_long",
+                        action="open_short",
                         stop_loss=stop_loss,
                         take_profit=take_profit,
                         reason=(
-                            f"斐波那契 {fib_key/1000:.3f} 回調 "
+                            f"斐波那契空 {fib_key/1000:.3f} 反彈 "
                             f"price={close:.4f} fib={fib_price:.4f} "
-                            f"high={high:.4f} low={low:.4f} "
+                            f"low={low:.4f} high={high:.4f} "
                             f"SL={stop_loss:.4f} TP={take_profit:.4f}"
                         ),
                     )
 
-        return Signal(action="hold", reason="未在斐波那契關鍵位或無反轉確認")
+        return Signal(
+            action="hold",
+            reason=f"非上升趨勢 EMA20={ema20:.4f} <= EMA50={ema50:.4f}",
+        )
 
-    def _find_swing_points(self, klines: list[Candle]) -> tuple[float, float] | None:
+    def _find_swing_high_low(self, klines: list[Candle]) -> tuple[float, float] | None:
         """
-        找出有效波段高低點。
-
-        BUG FIX #1：必須確認「高點在低點之前」的結構（先漲後回調），
-        才符合斐波那契做多的前提。
+        做多用：找出「先高後低」的有效波段（高點在前，低點在後）。
+        回傳 (high, low)
         """
         if len(klines) < _LOOKBACK:
             return None
 
         recent = klines[-_LOOKBACK:]
-
-        # 找最高點的位置
         high_idx = max(range(len(recent)), key=lambda i: recent[i].high)
         high_val = recent[high_idx].high
 
-        # 低點必須在高點之後（高點出現後才開始回調）
         if high_idx >= len(recent) - 2:
-            # 高點太靠近末端，回調還沒形成
             return None
 
         post_high = recent[high_idx:]
         low_val = min(c.low for c in post_high)
 
-        # 確保波幅足夠
         if low_val <= 0 or (high_val - low_val) / low_val < _MIN_SWING_PCT:
             return None
 
         return high_val, low_val
+
+    def _find_swing_low_high(self, klines: list[Candle]) -> tuple[float, float] | None:
+        """
+        做空用：找出「先低後高」的有效波段（低點在前，反彈在後）。
+        回傳 (low, high)
+        """
+        if len(klines) < _LOOKBACK:
+            return None
+
+        recent = klines[-_LOOKBACK:]
+        low_idx = min(range(len(recent)), key=lambda i: recent[i].low)
+        low_val = recent[low_idx].low
+
+        if low_idx >= len(recent) - 2:
+            return None
+
+        post_low = recent[low_idx:]
+        high_val = max(c.high for c in post_low)
+
+        if low_val <= 0 or (high_val - low_val) / low_val < _MIN_SWING_PCT:
+            return None
+
+        return low_val, high_val
 
     def _calculate_fib_levels(self, high: float, low: float) -> dict[str, float]:
         """計算斐波那契水平。使用整數 key 避免浮點精度問題。"""
@@ -145,46 +186,73 @@ class FibonacciStrategy(BaseStrategy):
     def _check_reversal_confirmation(
         self, klines: list[Candle], fib_level: float
     ) -> bool:
-        """
-        確認反轉信號（錘子線）。
-
-        BUG FIX #2：需至少 3 根 K 線才進行確認。
-        """
+        """做多反轉確認：錘子線（下影線 >= 實體 2 倍，或十字星）"""
         if len(klines) < 3:
             return False
 
         last = klines[-1]
 
-        # 價格觸及斐波那契位
         if not (last.low <= fib_level <= last.high):
             return False
 
-        # 錘子線：下影線 >= 實體 2 倍
         body = abs(last.close - last.open)
         lower_shadow = min(last.close, last.open) - last.low
 
         if body > 0:
             return lower_shadow >= body * 2.0
 
-        # 十字星也算（下影線佔整根 K 線 30% 以上）
         candle_range = last.high - last.low
         return candle_range > 0 and lower_shadow >= candle_range * 0.3
+
+    def _check_short_reversal_confirmation(
+        self, klines: list[Candle], fib_level: float
+    ) -> bool:
+        """做空反轉確認：射擊之星（上影線 >= 實體 2 倍，或倒十字星）"""
+        if len(klines) < 3:
+            return False
+
+        last = klines[-1]
+
+        if not (last.low <= fib_level <= last.high):
+            return False
+
+        body = abs(last.close - last.open)
+        upper_shadow = last.high - max(last.close, last.open)
+
+        if body > 0:
+            return upper_shadow >= body * 2.0
+
+        candle_range = last.high - last.low
+        return candle_range > 0 and upper_shadow >= candle_range * 0.3
 
     # ── 出場 ──────────────────────────────────────────────────────────────────
 
     def _check_exit(self, snap: IndicatorSnapshot, pos: ActivePosition) -> Signal:
         close = snap.close
 
-        if close <= pos.stop_loss:
-            return Signal(
-                action="close",
-                reason=f"觸發止損 price={close:.4f} SL={pos.stop_loss:.4f}",
-            )
-
-        if close >= pos.take_profit:
-            return Signal(
-                action="close",
-                reason=f"達到前高目標 price={close:.4f} TP={pos.take_profit:.4f}",
-            )
+        if pos.side == "SELL":
+            # 做空：價格上漲超過 SL 止損，下跌達到 TP 止盈
+            if close >= pos.stop_loss:
+                return Signal(
+                    action="close",
+                    reason=f"觸發止損 price={close:.4f} SL={pos.stop_loss:.4f}",
+                )
+            if close <= pos.take_profit:
+                return Signal(
+                    action="close",
+                    reason=f"達到前低目標 price={close:.4f} TP={pos.take_profit:.4f}",
+                )
+        else:
+            # 做多：價格下跌低於 SL 止損，上漲達到 TP 止盈
+            if close <= pos.stop_loss:
+                return Signal(
+                    action="close",
+                    reason=f"觸發止損 price={close:.4f} SL={pos.stop_loss:.4f}",
+                )
+            if close >= pos.take_profit:
+                return Signal(
+                    action="close",
+                    reason=f"達到前高目標 price={close:.4f} TP={pos.take_profit:.4f}",
+                )
 
         return Signal(action="hold", reason=f"持倉中 price={close:.4f}")
