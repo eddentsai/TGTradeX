@@ -94,7 +94,7 @@ class FibonacciStrategy(BaseStrategy):
         # ── 做空：下降趨勢 ──────────────────────────────────────────────────────
         swing = self._find_swing_low_high(snap.klines)
         if swing is None:
-            return Signal(action="hold", reason="非上升趨勢 EMA20={:.4f} <= EMA50={:.4f}".format(ema20, ema50))
+            return Signal(action="hold", reason=f"下降趨勢但無有效反彈波段可做空 EMA20={ema20:.4f} <= EMA50={ema50:.4f}")
 
         low, high = swing
         fib_levels = self._calculate_fib_levels(high, low)
