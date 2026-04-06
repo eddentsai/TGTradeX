@@ -557,6 +557,22 @@ class ServiceRunner:
             size_result.liquidation_price * 1.05 if size_result else entry * 0.95
         )
         tp = signal.take_profit or entry * 1.05
+
+        # 驗證 SL 方向：做多 SL 必須低於進場價；做空 SL 必須高於進場價
+        # 若 SL 方向錯誤（例如 VWAP 策略 SL 帶位已被價格穿越），跳過開倉
+        if side == "SELL" and sl <= entry:
+            logger.warning(
+                f"[{self._symbol}] 做空 SL={sl:.4f} <= entry={entry:.4f}，"
+                f"止損位已在進場價下方（VWAP 帶位被穿越），跳過開倉"
+            )
+            return
+        if side == "BUY" and sl >= entry:
+            logger.warning(
+                f"[{self._symbol}] 做多 SL={sl:.4f} >= entry={entry:.4f}，"
+                f"止損位已在進場價上方，跳過開倉"
+            )
+            return
+
         payload["slPrice"] = str(round(sl, 8))
         payload["slStopType"] = "MARK_PRICE"
         payload["slOrderType"] = "MARKET"
