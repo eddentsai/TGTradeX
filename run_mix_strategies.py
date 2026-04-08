@@ -198,15 +198,28 @@ def main() -> None:
 
     # ── 啟動日誌 ──────────────────────────────────────────────────────────────
     log = logging.getLogger(__name__)
-    strategy_names = [s().name for s in _ENSEMBLE_STRATEGIES]
     scan_label = args.scan_exchange or args.exchange
+
+    # 先建立策略實例，後續傳給 RunnerManager
+    _SHORT_INTERVALS = {"1m", "3m", "5m", "15m", "30m"}
+    if args.interval in _SHORT_INTERVALS:
+        fib_strategy = FibonacciStrategy(lookback=200, min_swing_pct=0.03)
+    else:
+        fib_strategy = FibonacciStrategy()
+
+    ensemble_strategies = [
+        fib_strategy,
+        VwapPocStrategy(),
+        DipVolumeStrategy(),
+    ]
+    strategy_names = [s.name for s in ensemble_strategies]
 
     log.info(
         "Ensemble 模式啟動\n"
         f"  exchange       = {args.exchange}\n"
         f"  scan_exchange  = {scan_label}\n"
         f"  strategies     = {' / '.join(strategy_names)}\n"
-        f"  min_confirm    = {args.min_confirm}/{len(_ENSEMBLE_STRATEGIES)}\n"
+        f"  min_confirm    = {args.min_confirm}/{len(ensemble_strategies)}\n"
         f"  max_positions  = {args.max_positions}\n"
         f"  min_volume     = {min_volume:,.0f} USDT\n"
         f"  scan_interval  = {args.scan_interval}s\n"
@@ -247,20 +260,6 @@ def main() -> None:
         risk_pct=args.risk_pct / 100.0,
         qty_precision=3,  # 佔位符，RunnerManager 內部會覆寫
     )
-
-    # ── 根據時間框決定 fibonacci 參數 ────────────────────────────────────────
-    # 15m/5m 等短時框用更長的回看窗口與較小的波幅門檻，避免訊號過少
-    _SHORT_INTERVALS = {"1m", "3m", "5m", "15m", "30m"}
-    if args.interval in _SHORT_INTERVALS:
-        fib_strategy = FibonacciStrategy(lookback=200, min_swing_pct=0.03)
-    else:
-        fib_strategy = FibonacciStrategy()  # 預設：lookback=50, min_swing_pct=5%
-
-    ensemble_strategies = [
-        fib_strategy,
-        VwapPocStrategy(),
-        DipVolumeStrategy(),
-    ]
 
     # ── 建立 RunnerManager（Ensemble 模式）────────────────────────────────────
     manager = RunnerManager(
