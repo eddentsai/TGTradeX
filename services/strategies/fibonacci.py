@@ -119,7 +119,7 @@ class FibonacciStrategy(BaseStrategy):
 
         return Signal(
             action="hold",
-            reason=f"非上升趨勢 EMA20={ema20:.4f} <= EMA50={ema50:.4f}",
+            reason=f"下降趨勢未在斐波那契關鍵位或無射擊之星確認 EMA20={ema20:.4f} <= EMA50={ema50:.4f}",
         )
 
     def _find_swing_high_low(self, klines: list[Candle]) -> tuple[float, float] | None:
