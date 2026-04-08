@@ -36,11 +36,19 @@ _FIB_EXTEND: dict[int, float] = {
 }
 _ENTRY_FIBS = [618, 500, 382]  # 優先進場位（整數 key）
 _CONFLUENCE_TOL = 0.005  # 匯合區容差 0.5%
-_LOOKBACK = 50  # 尋找高低點的回看週期
-_MIN_SWING_PCT = 0.05  # 最小波幅 5%
+_LOOKBACK = 50          # 尋找高低點的回看週期（預設，適合 1h/4h）
+_MIN_SWING_PCT = 0.05   # 最小波幅 5%（預設）
 
 
 class FibonacciStrategy(BaseStrategy):
+
+    def __init__(
+        self,
+        lookback: int = _LOOKBACK,
+        min_swing_pct: float = _MIN_SWING_PCT,
+    ) -> None:
+        self._lookback = lookback
+        self._min_swing_pct = min_swing_pct
 
     @property
     def name(self) -> str:
@@ -127,10 +135,10 @@ class FibonacciStrategy(BaseStrategy):
         做多用：找出「先高後低」的有效波段（高點在前，低點在後）。
         回傳 (high, low)
         """
-        if len(klines) < _LOOKBACK:
+        if len(klines) < self._lookback:
             return None
 
-        recent = klines[-_LOOKBACK:]
+        recent = klines[-self._lookback:]
         high_idx = max(range(len(recent)), key=lambda i: recent[i].high)
         high_val = recent[high_idx].high
 
@@ -140,7 +148,7 @@ class FibonacciStrategy(BaseStrategy):
         post_high = recent[high_idx:]
         low_val = min(c.low for c in post_high)
 
-        if low_val <= 0 or (high_val - low_val) / low_val < _MIN_SWING_PCT:
+        if low_val <= 0 or (high_val - low_val) / low_val < self._min_swing_pct:
             return None
 
         return high_val, low_val
@@ -150,10 +158,10 @@ class FibonacciStrategy(BaseStrategy):
         做空用：找出「先低後高」的有效波段（低點在前，反彈在後）。
         回傳 (low, high)
         """
-        if len(klines) < _LOOKBACK:
+        if len(klines) < self._lookback:
             return None
 
-        recent = klines[-_LOOKBACK:]
+        recent = klines[-self._lookback:]
         low_idx = min(range(len(recent)), key=lambda i: recent[i].low)
         low_val = recent[low_idx].low
 
@@ -163,7 +171,7 @@ class FibonacciStrategy(BaseStrategy):
         post_low = recent[low_idx:]
         high_val = max(c.high for c in post_low)
 
-        if low_val <= 0 or (high_val - low_val) / low_val < _MIN_SWING_PCT:
+        if low_val <= 0 or (high_val - low_val) / low_val < self._min_swing_pct:
             return None
 
         return low_val, high_val
