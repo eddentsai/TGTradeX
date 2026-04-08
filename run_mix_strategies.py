@@ -289,7 +289,7 @@ def main() -> None:
     if notifier is not None:
         notifier.notify_start(
             exchange=args.exchange,
-            mode=f"Ensemble {args.min_confirm}/{len(_ENSEMBLE_STRATEGIES)}",
+            mode=f"Ensemble {args.min_confirm}/{len(ensemble_strategies)}",
             interval=args.interval,
         )
 
