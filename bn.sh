@@ -10,7 +10,8 @@
 #   status  — 顯示各幣種運行狀態
 
 LOG_DIR="logs"
-mkdir -p "$LOG_DIR"
+ARCHIVE_DIR="$LOG_DIR/bn"
+mkdir -p "$LOG_DIR" "$ARCHIVE_DIR"
 
 # ── 幣種設定 ───────────────────────────────────────────────────────────────────
 # 格式：NAMES / SYMBOLS / DELAYS 三個陣列對應索引相同
@@ -30,6 +31,16 @@ is_running() {
     [[ -f "$pf" ]] && kill -0 "$(cat "$pf")" 2>/dev/null
 }
 
+archive_log() {
+    local name="$1"
+    local lf; lf=$(log_file "$name")
+    if [[ -s "$lf" ]]; then
+        local ts; ts=$(date +"%Y%m%d_%H%M%S")
+        mv "$lf" "$ARCHIVE_DIR/bn_${name}_${ts}.log"
+        echo "  [bn_${name}] 舊 log 已封存 → $ARCHIVE_DIR/bn_${name}_${ts}.log"
+    fi
+}
+
 start_one() {
     local name="$1" symbol="$2" delay="$3"
     local pf; pf=$(pid_file "$name")
@@ -40,6 +51,7 @@ start_one() {
         return
     fi
 
+    archive_log "$name"
     touch "$lf"
     nohup python -u run_service.py \
         $COMMON_ARGS \

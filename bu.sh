@@ -10,7 +10,8 @@
 #   status  — 顯示運行狀態
 
 LOG_DIR="logs"
-mkdir -p "$LOG_DIR"
+ARCHIVE_DIR="$LOG_DIR/bu"
+mkdir -p "$LOG_DIR" "$ARCHIVE_DIR"
 
 NAME="auto_bu"
 LOG_FILE="$LOG_DIR/${NAME}.log"
@@ -25,12 +26,21 @@ is_running() {
     [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
 }
 
+archive_log() {
+    if [[ -s "$LOG_FILE" ]]; then
+        local ts; ts=$(date +"%Y%m%d_%H%M%S")
+        mv "$LOG_FILE" "$ARCHIVE_DIR/${NAME}_${ts}.log"
+        echo "  舊 log 已封存 → $ARCHIVE_DIR/${NAME}_${ts}.log"
+    fi
+}
+
 do_start() {
     if is_running; then
         echo "  已在運行（PID=$(cat "$PID_FILE")），略過"
         return
     fi
 
+    archive_log
     touch "$LOG_FILE"
     nohup python -u run_mix_strategies.py $SERVICE_ARGS \
         > "$LOG_FILE" 2>&1 &
