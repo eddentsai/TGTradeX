@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import time
 from typing import Any
+
+logger = logging.getLogger(__name__)
 from urllib.parse import urlencode
 
 import requests as _requests
@@ -210,30 +213,37 @@ class BinanceExchange(BaseExchange):
         }
 
         # ── 開倉後掛交易所 SL/TP 條件單 ──────────────────────────────────────
+        # 注意：SL/TP 掛單失敗只記警告，不拋例外，確保倉位快取一定能被存下來
         if trade_side == "OPEN":
             close_side = NewAlgoOrderSideEnum("SELL" if payload["side"] == "BUY" else "BUY")
             sl_price   = payload.get("slPrice")
             tp_price   = payload.get("tpPrice")
             if sl_price:
-                self._client.rest_api.new_algo_order(
-                    algo_type="CONDITIONAL",
-                    symbol=symbol,
-                    side=close_side,
-                    type="STOP_MARKET",
-                    trigger_price=self._align_price(float(sl_price), symbol),
-                    working_type=NewAlgoOrderWorkingTypeEnum.MARK_PRICE,
-                    close_position="true",
-                )
+                try:
+                    self._client.rest_api.new_algo_order(
+                        algo_type="CONDITIONAL",
+                        symbol=symbol,
+                        side=close_side,
+                        type="STOP_MARKET",
+                        trigger_price=self._align_price(float(sl_price), symbol),
+                        working_type=NewAlgoOrderWorkingTypeEnum.MARK_PRICE,
+                        close_position="true",
+                    )
+                except Exception as e:
+                    logger.warning(f"[{symbol}] SL 條件單掛單失敗（倉位已建立）: {e}")
             if tp_price:
-                self._client.rest_api.new_order(
-                    symbol=symbol,
-                    side=NewOrderSideEnum("SELL" if payload["side"] == "BUY" else "BUY"),
-                    type="LIMIT",
-                    quantity=qty,
-                    price=self._align_price(float(tp_price), symbol),
-                    time_in_force="GTC",
-                    reduce_only="true",
-                )
+                try:
+                    self._client.rest_api.new_order(
+                        symbol=symbol,
+                        side=NewOrderSideEnum("SELL" if payload["side"] == "BUY" else "BUY"),
+                        type="LIMIT",
+                        quantity=qty,
+                        price=self._align_price(float(tp_price), symbol),
+                        time_in_force="GTC",
+                        reduce_only="true",
+                    )
+                except Exception as e:
+                    logger.warning(f"[{symbol}] TP 限價單掛單失敗（倉位已建立）: {e}")
 
         return result
 
