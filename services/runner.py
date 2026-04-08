@@ -72,6 +72,8 @@ def _is_transient_error(e: Exception) -> bool:
             "rate limit",
             "-1021",
             "timestamp for this request",
+            "network error",
+            "[1]",
         )
     ):
         return True
