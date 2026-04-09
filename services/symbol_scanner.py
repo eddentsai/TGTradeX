@@ -135,8 +135,9 @@ class SymbolScanner:
 
         now = time.time()
         candidates = []
-        skipped_volatile = []
+        skipped_crash = []
         skipped_cooldown = []
+        pumped_through = []
         skipped_no_market = 0
         for t in tickers:
             sym = t.get("symbol", "")
@@ -153,35 +154,44 @@ class SymbolScanner:
             vol = t.get("quote_vol", 0) or 0
             if vol < self._min_quote_vol and sym not in held:
                 continue
-            # 排除近期異常行情：漲跌幅過大代表 K 線形態已失真
             change_pct = t.get("change_pct", 0) or 0
-            if sym not in held and abs(change_pct) > self._max_change_pct:
-                skipped_volatile.append(f"{sym}({change_pct:+.1f}%)")
-                self._volatile_banned[sym] = now  # 記錄排除時間
-                continue
-            # 冷卻期：曾因異常行情被排除，尚未冷卻完畢
-            if sym not in held and sym in self._volatile_banned:
-                elapsed = now - self._volatile_banned[sym]
-                if elapsed < self._volatile_cooldown_secs:
-                    remaining_h = (self._volatile_cooldown_secs - elapsed) / 3600
-                    skipped_cooldown.append(f"{sym}(剩{remaining_h:.1f}h)")
+            if sym not in held:
+                # 急跌：K 線已失真，流動性差，排除並進冷卻
+                if change_pct < -self._max_change_pct:
+                    skipped_crash.append(f"{sym}({change_pct:+.1f}%)")
+                    self._volatile_banned[sym] = now
                     continue
-                else:
-                    del self._volatile_banned[sym]  # 冷卻結束，解除
+                # 急漲：放行給策略層評估（dip_volume 可做空）
+                if change_pct > self._max_change_pct:
+                    pumped_through.append(f"{sym}({change_pct:+.1f}%)")
+                # 冷卻期：曾因急跌被排除，尚未冷卻完畢
+                if sym in self._volatile_banned:
+                    elapsed = now - self._volatile_banned[sym]
+                    if elapsed < self._volatile_cooldown_secs:
+                        remaining_h = (self._volatile_cooldown_secs - elapsed) / 3600
+                        skipped_cooldown.append(f"{sym}(剩{remaining_h:.1f}h)")
+                        continue
+                    else:
+                        del self._volatile_banned[sym]
             candidates.append((sym, vol))
 
         if skipped_no_market:
             logger.info(
                 f"[Scanner] 排除 {skipped_no_market} 個 {self._trade_exchange.name} 未上市的合約"
             )
-        if skipped_volatile:
+        if skipped_crash:
             logger.info(
-                f"[Scanner] 排除異常行情幣種（|漲跌|>{self._max_change_pct:.0f}%）: "
-                + ", ".join(skipped_volatile)
+                f"[Scanner] 排除急跌幣種（跌幅>{self._max_change_pct:.0f}%，K 線失真）: "
+                + ", ".join(skipped_crash)
+            )
+        if pumped_through:
+            logger.info(
+                f"[Scanner] 急漲幣種（漲幅>{self._max_change_pct:.0f}%，放行供策略評估做空）: "
+                + ", ".join(pumped_through)
             )
         if skipped_cooldown:
             logger.info(
-                f"[Scanner] 冷卻中幣種（曾有異常行情，{self._volatile_cooldown_secs/3600:.0f}h 冷卻）: "
+                f"[Scanner] 冷卻中幣種（曾急跌，{self._volatile_cooldown_secs/3600:.0f}h 冷卻）: "
                 + ", ".join(skipped_cooldown)
             )
 
