@@ -233,12 +233,15 @@ def main() -> None:
 
     strategy_names = [s.name for s in ensemble_strategies]
 
+    # min_confirm 不可超過策略總數
+    min_confirm = min(args.min_confirm, len(ensemble_strategies))
+
     log.info(
         "Ensemble 模式啟動\n"
         f"  exchange       = {args.exchange}\n"
         f"  scan_exchange  = {scan_label}\n"
         f"  strategies     = {' / '.join(strategy_names)}\n"
-        f"  min_confirm    = {args.min_confirm}/{len(ensemble_strategies)}\n"
+        f"  min_confirm    = {min_confirm}/{len(ensemble_strategies)}\n"
         f"  max_positions  = {args.max_positions}\n"
         f"  min_volume     = {min_volume:,.0f} USDT\n"
         f"  scan_interval  = {args.scan_interval}s\n"
@@ -291,7 +294,7 @@ def main() -> None:
         dry_run=args.dry_run,
         enable_ensemble=True,
         ensemble_strategies=ensemble_strategies,
-        ensemble_min_confirm=args.min_confirm,
+        ensemble_min_confirm=min_confirm,
         redis_url=args.redis_url or None,
         notifier=notifier,
         risk_guard=risk_guard,
@@ -308,7 +311,7 @@ def main() -> None:
     if notifier is not None:
         notifier.notify_start(
             exchange=args.exchange,
-            mode=f"Ensemble {args.min_confirm}/{len(ensemble_strategies)}",
+            mode=f"Ensemble {min_confirm}/{len(ensemble_strategies)}",
             interval=args.interval,
         )
 
