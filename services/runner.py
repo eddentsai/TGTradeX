@@ -434,7 +434,7 @@ class ServiceRunner:
                 )
             else:
                 # 無快取：只能用保守 5% 重建
-                entry = float(pos_dict.get("openPrice", snap.close))
+                entry = float(pos_dict.get("avgOpenPrice") or pos_dict.get("entryPrice") or snap.close)
                 side = pos_dict.get("side", "BUY")
                 qty = str(pos_dict.get("qty", self._fixed_qty or "0"))
                 sl_price = entry * (0.95 if side == "BUY" else 1.05)
@@ -776,8 +776,8 @@ class ServiceRunner:
             positions = self._exchange.get_pending_positions(self._symbol)
             pos = next((p for p in positions if p.get("symbol") == self._symbol), None)
             if pos:
-                # Bitunix: openPrice；Binance: entryPrice
-                raw = pos.get("openPrice") or pos.get("entryPrice") or 0
+                # Bitunix: avgOpenPrice；Binance: entryPrice
+                raw = pos.get("avgOpenPrice") or pos.get("entryPrice") or 0
                 price = float(raw)
                 if price > 0:
                     return price
