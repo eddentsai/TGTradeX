@@ -293,6 +293,7 @@ class ServiceRunner:
 
         # 2. 計算指標（傳入原始 K 線數據）
         snap = compute_indicators(candles)
+        snap.symbol = self._symbol
 
         # 3. 識別市場狀態
         state = classify_market(snap)

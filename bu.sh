@@ -18,7 +18,8 @@ LOG_FILE="$LOG_DIR/${NAME}.log"
 PID_FILE="$LOG_DIR/${NAME}.pid"
 
 SERVICE_ARGS="--exchange bitunix --max-positions 3 --min-volume=100000 \
-    --leverage 4 --risk-pct 0.8 --interval 15m --scan-interval 14400"
+    --leverage 4 --risk-pct 0.8 --interval 15m --scan-interval 3600 \
+    --strategies oi_ls_ratio"
 
 # ── 工具函式 ───────────────────────────────────────────────────────────────────
 

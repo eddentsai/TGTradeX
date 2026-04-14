@@ -27,6 +27,9 @@ class IndicatorSnapshot:
     close: float
     prev_close: float | None = None
 
+    # 幣種識別（由 runner 在建立 snap 後填入）
+    symbol: str = ""
+
     # 新增：原始 K 線數據
     klines: list[Candle] = field(default_factory=list)
 

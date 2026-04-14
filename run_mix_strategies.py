@@ -38,6 +38,7 @@ from services.risk_guard import RiskGuard
 from services.runner_manager import RunnerManager
 from services.strategies.dip_volume import DipVolumeStrategy
 from services.strategies.fibonacci import FibonacciStrategy
+from services.strategies.oi_ls_ratio import OiLsRatioStrategy
 from services.strategies.vwap_poc import VwapPocStrategy
 from services.symbol_scanner import SymbolScanner
 
@@ -181,6 +182,12 @@ def main() -> None:
         default=10.0,
         help="當日累計虧損百分比上限（預設 10.0）；超過後停止開倉，次日 UTC 00:00 自動恢復",
     )
+    parser.add_argument(
+        "--strategies",
+        type=str,
+        default=None,
+        help="指定啟用的策略，逗號分隔（fibonacci/vwap_poc/dip_volume/oi_ls_ratio），預設全部啟用",
+    )
     args = parser.parse_args()
 
     # ── 參數驗證 ──────────────────────────────────────────────────────────────
@@ -200,18 +207,30 @@ def main() -> None:
     log = logging.getLogger(__name__)
     scan_label = args.scan_exchange or args.exchange
 
-    # 先建立策略實例，後續傳給 RunnerManager
+    # 先建立所有可用策略實例
     _SHORT_INTERVALS = {"1m", "3m", "5m", "15m", "30m"}
-    if args.interval in _SHORT_INTERVALS:
-        fib_strategy = FibonacciStrategy(lookback=200, min_swing_pct=0.03)
-    else:
-        fib_strategy = FibonacciStrategy()
+    fib_strategy = (
+        FibonacciStrategy(lookback=200, min_swing_pct=0.03)
+        if args.interval in _SHORT_INTERVALS
+        else FibonacciStrategy()
+    )
+    _ALL_STRATEGIES = {
+        "fibonacci":     fib_strategy,
+        "vwap_poc":      VwapPocStrategy(),
+        "dip_volume":    DipVolumeStrategy(),
+        "oi_ls_ratio":   OiLsRatioStrategy(period=args.interval),
+    }
 
-    ensemble_strategies = [
-        fib_strategy,
-        VwapPocStrategy(),
-        DipVolumeStrategy(),
-    ]
+    # 根據 --strategies 篩選（預設全部啟用）
+    if args.strategies:
+        selected = [s.strip() for s in args.strategies.split(",")]
+        unknown = [s for s in selected if s not in _ALL_STRATEGIES]
+        if unknown:
+            parser.error(f"未知策略: {', '.join(unknown)}。可用：{', '.join(_ALL_STRATEGIES)}")
+        ensemble_strategies = [_ALL_STRATEGIES[s] for s in selected]
+    else:
+        ensemble_strategies = list(_ALL_STRATEGIES.values())
+
     strategy_names = [s.name for s in ensemble_strategies]
 
     log.info(
