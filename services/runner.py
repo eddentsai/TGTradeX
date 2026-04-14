@@ -492,6 +492,8 @@ class ServiceRunner:
             self._open_position(signal, snap, strategy_name)
         elif signal.action == "close":
             self._close_position(signal, active_pos, snap.close)
+        elif signal.action == "trail_sl":
+            self._update_trailing_sl(signal, snap, active_pos)
 
     def _open_position(
         self, signal: Signal, snap: IndicatorSnapshot, strategy_name: str
@@ -605,6 +607,23 @@ class ServiceRunner:
                 return
             raise
         logger.info(f"[{self._symbol}] 開倉送出 orderId={result.get('orderId')}")
+
+        # 查詢實際成交價，避免 SL/TP 以信號價計算導致立即觸發
+        actual_entry = self._fetch_actual_entry(entry)
+        if abs(actual_entry - entry) / entry > 0.001:  # 偏差 > 0.1% 時重算
+            sl_pct = abs(sl - entry) / entry
+            tp_pct = abs(tp - entry) / entry
+            if side == "BUY":
+                sl = round(actual_entry * (1 - sl_pct), 8)
+                tp = round(actual_entry * (1 + tp_pct), 8)
+            else:
+                sl = round(actual_entry * (1 + sl_pct), 8)
+                tp = round(actual_entry * (1 - tp_pct), 8)
+            logger.info(
+                f"[{self._symbol}] 實際成交價 {actual_entry:.4f}（信號價 {entry:.4f}），"
+                f"重算 SL={sl:.4f} TP={tp:.4f}"
+            )
+            entry = actual_entry
 
         self._active_pos = ActivePosition(
             position_id="",
@@ -748,3 +767,70 @@ class ServiceRunner:
 
         self._active_pos = None
         pos_delete(self._exchange.name, self._symbol)
+
+    def _fetch_actual_entry(self, fallback: float) -> float:
+        """開倉後查詢交易所的實際成交價；失敗時回傳 fallback（信號價）"""
+        try:
+            import time as _time
+            _time.sleep(0.5)  # 等交易所確認成交
+            positions = self._exchange.get_pending_positions(self._symbol)
+            pos = next((p for p in positions if p.get("symbol") == self._symbol), None)
+            if pos:
+                # Bitunix: openPrice；Binance: entryPrice
+                raw = pos.get("openPrice") or pos.get("entryPrice") or 0
+                price = float(raw)
+                if price > 0:
+                    return price
+        except Exception as e:
+            logger.debug(f"[{self._symbol}] 查詢實際成交價失敗，使用信號價: {e}")
+        return fallback
+
+    def _update_trailing_sl(
+        self,
+        signal: Signal,
+        snap: IndicatorSnapshot,
+        active_pos: ActivePosition | None,
+    ) -> None:
+        """移動止損：取消舊 SL/TP，重掛新 SL（trailing）+ 原始 TP"""
+        if active_pos is None or signal.stop_loss is None:
+            return
+
+        new_sl = signal.stop_loss
+        new_tp = signal.take_profit or active_pos.take_profit
+
+        if self._dry_run:
+            logger.info(
+                f"[DRY-RUN] 移動止損更新 SL={new_sl:.4f} TP={new_tp:.4f}  "
+                f"理由={signal.reason}"
+            )
+            return
+
+        # 取消現有 SL/TP 條件單
+        try:
+            self._exchange.cancel_all_orders(self._symbol)
+        except Exception as e:
+            logger.warning(f"[{self._symbol}] 移動止損：取消舊條件單失敗: {e}")
+
+        # 重掛新 SL + 原始 TP
+        try:
+            self._exchange.place_sl_tp_orders(
+                symbol=self._symbol,
+                side=active_pos.side,
+                qty=active_pos.qty,
+                sl_price=new_sl,
+                tp_price=new_tp,
+                position_id=active_pos.position_id,
+            )
+        except Exception as e:
+            logger.warning(f"[{self._symbol}] 移動止損：重掛條件單失敗: {e}")
+            return
+
+        # 更新本地狀態
+        close = snap.close
+        if active_pos.side == "BUY":
+            active_pos.peak_price = max(active_pos.peak_price or active_pos.entry_price, close)
+        else:
+            active_pos.peak_price = min(active_pos.peak_price or active_pos.entry_price, close)
+        active_pos.stop_loss = new_sl
+        pos_save(self._exchange.name, self._symbol, active_pos)
+        logger.info(f"[{self._symbol}] 移動止損更新  {signal.reason}")

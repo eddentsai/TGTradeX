@@ -40,6 +40,7 @@ def save(exchange: str, symbol: str, pos: ActivePosition) -> None:
         "take_profit":   round(pos.take_profit, 8),
         "strategy_name": pos.strategy_name,
         "interval":      pos.interval,
+        "peak_price":    round(pos.peak_price, 8) if pos.peak_price is not None else None,
     }
     _path(exchange, symbol).write_text(json.dumps(data, indent=2), encoding="utf-8")
     logger.debug(f"[{exchange}/{symbol}] 倉位狀態已儲存 → {_path(exchange, symbol)}")
@@ -52,6 +53,7 @@ def load(exchange: str, symbol: str) -> ActivePosition | None:
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        peak = data.get("peak_price")
         return ActivePosition(
             position_id=data["position_id"],
             side=data["side"],
@@ -62,6 +64,7 @@ def load(exchange: str, symbol: str) -> ActivePosition | None:
             strategy_name=data.get("strategy_name", "recovered"),
             exchange=data.get("exchange", exchange),
             interval=data.get("interval", ""),
+            peak_price=float(peak) if peak is not None else None,
         )
     except Exception as e:
         logger.warning(f"[{exchange}/{symbol}] 讀取倉位快取失敗，忽略: {e}")

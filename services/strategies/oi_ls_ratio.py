@@ -31,8 +31,9 @@ logger = logging.getLogger(__name__)
 _LOOKBACK = 4            # 取幾期數據判斷趨勢（最少需要 2）
 _OI_MIN_CHANGE_PCT = 0.5    # OI 上升最少 0.5%
 _LS_MIN_CHANGE_PCT = 2.0    # 多空比變動最少 2%
-_SL_PCT = 0.015          # 止損 1.5%
+_SL_PCT = 0.015          # 初始止損 1.5%
 _TP_PCT = 0.030          # 止盈 3.0%
+_TRAIL_PCT = 0.015       # 移動止損：從峰值回落 1.5% 觸發
 
 # Binance OI/LS API 支援的最小 period
 _PERIOD_MAP = {
@@ -70,6 +71,7 @@ class OiLsRatioStrategy(BaseStrategy):
         ls_min_change: float = _LS_MIN_CHANGE_PCT,
         sl_pct: float = _SL_PCT,
         tp_pct: float = _TP_PCT,
+        trail_pct: float = _TRAIL_PCT,
         data_provider: BinanceFuturesData | None = None,
     ) -> None:
         self._period = _PERIOD_MAP.get(period, period)
@@ -78,6 +80,7 @@ class OiLsRatioStrategy(BaseStrategy):
         self._ls_min_change = ls_min_change
         self._sl_pct = sl_pct
         self._tp_pct = tp_pct
+        self._trail_pct = trail_pct
         self._data = data_provider or BinanceFuturesData()
 
     @property
@@ -151,28 +154,52 @@ class OiLsRatioStrategy(BaseStrategy):
 
     def _check_exit(self, snap: IndicatorSnapshot, pos: ActivePosition) -> Signal:
         close = snap.close
+        symbol = self._resolve_symbol(snap)
 
         if pos.side == "SELL":
+            # 硬止損 / 止盈
             if close >= pos.stop_loss:
                 return Signal(action="close", reason=f"觸發止損 price={close:.4f} SL={pos.stop_loss:.4f}")
             if close <= pos.take_profit:
                 return Signal(action="close", reason=f"達到止盈 price={close:.4f} TP={pos.take_profit:.4f}")
 
-            # 多空比方向反轉（空頭開始減少）→ 提前出場
-            symbol = self._resolve_symbol(snap)
+            # 移動止損：追蹤最低價，SL 跟著下移
+            peak = min(pos.peak_price or pos.entry_price, close)  # 做空峰值 = 最低點
+            trail_sl = round(peak * (1 + self._trail_pct), 8)
+            if trail_sl < pos.stop_loss:  # SL 下移（對空頭有利）
+                return Signal(
+                    action="trail_sl",
+                    stop_loss=trail_sl,
+                    take_profit=pos.take_profit,
+                    reason=f"移動止損下移 peak={peak:.4f} SL {pos.stop_loss:.4f}→{trail_sl:.4f}",
+                )
+
+            # LS 反轉 → 提前出場
             ls_data = self._data.get_ls_ratio_history(symbol, self._period, self._lookback)
             if ls_data and len(ls_data) >= 2:
                 ls_values = [r["longShortRatio"] for r in ls_data]
                 if _trend_change_pct(ls_values) < 0:
                     return Signal(action="close", reason=f"軋多訊號消失（LS 反轉）price={close:.4f}")
-        else:
+
+        else:  # BUY
+            # 硬止損 / 止盈
             if close <= pos.stop_loss:
                 return Signal(action="close", reason=f"觸發止損 price={close:.4f} SL={pos.stop_loss:.4f}")
             if close >= pos.take_profit:
                 return Signal(action="close", reason=f"達到止盈 price={close:.4f} TP={pos.take_profit:.4f}")
 
-            # 多空比方向反轉（多頭開始減少）→ 提前出場
-            symbol = self._resolve_symbol(snap)
+            # 移動止損：追蹤最高價，SL 跟著上移
+            peak = max(pos.peak_price or pos.entry_price, close)
+            trail_sl = round(peak * (1 - self._trail_pct), 8)
+            if trail_sl > pos.stop_loss:  # SL 上移（對多頭有利）
+                return Signal(
+                    action="trail_sl",
+                    stop_loss=trail_sl,
+                    take_profit=pos.take_profit,
+                    reason=f"移動止損上移 peak={peak:.4f} SL {pos.stop_loss:.4f}→{trail_sl:.4f}",
+                )
+
+            # LS 反轉 → 提前出場
             ls_data = self._data.get_ls_ratio_history(symbol, self._period, self._lookback)
             if ls_data and len(ls_data) >= 2:
                 ls_values = [r["longShortRatio"] for r in ls_data]

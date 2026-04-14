@@ -21,12 +21,13 @@ class ActivePosition:
     strategy_name: str = ""
     exchange: str = ""        # 交易所名稱，例如 "bitunix" | "binance"
     interval: str = ""        # K 線週期，例如 "15m" | "1h"
+    peak_price: float | None = None  # 移動止損用：做多記最高價，做空記最低價
 
 
 @dataclass
 class Signal:
     """策略回傳的交易信號"""
-    action: str               # "open_long" | "open_short" | "close" | "hold"
+    action: str               # "open_long" | "open_short" | "close" | "hold" | "trail_sl"
     order_type: str = "MARKET"
     price: str | None = None
     stop_loss: float | None = None    # 開倉時設定，由 runner 存入 ActivePosition
