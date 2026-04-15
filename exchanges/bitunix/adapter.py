@@ -5,10 +5,14 @@ Bitunix 交易所 Adapter
 """
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 from exchanges.base import BaseExchange
 from exchanges.bitunix import BitunixClient
+
+logger = logging.getLogger(__name__)
 
 
 class BitunixExchange(BaseExchange):
@@ -40,36 +44,75 @@ class BitunixExchange(BaseExchange):
         if self._client.futures_private is None:
             raise RuntimeError("未設定 Bitunix credentials")
 
-        # 把 runner 傳來的 tpPrice 欄位獨立拆出來，
-        # 不使用條件觸發方式掛止盈，而是開倉後補一筆普通限價減倉單（maker 手續費）
+        sym        = payload["symbol"]
+        price_prec = self.get_price_precision(sym)
+
+        # ── 把 SL/TP 欄位全部拆出來，開倉後再分別補掛 ──────────────────────
+        # SL 嵌入 place_order 時若市價已超過 SL，交易所返回 [30031] 拒絕整筆單；
+        # 改成開倉成功後用 tpsl 專用端點補掛，避免此問題。
+        sl_price      = payload.pop("slPrice",      None)
+        sl_stop_type  = payload.pop("slStopType",   "MARK_PRICE")
+        sl_order_type = payload.pop("slOrderType",  "MARKET")
+        payload.pop("slOrderPrice", None)
+
         tp_price  = payload.pop("tpPrice",      None)
         payload.pop("tpStopType",  None)
         payload.pop("tpOrderType", None)
         payload.pop("tpOrderPrice", None)
 
-        # SL 欄位對齊交易所價格精度
-        sym        = payload["symbol"]
-        price_prec = self.get_price_precision(sym)
-        if "slPrice" in payload:
-            payload["slPrice"] = str(round(float(payload["slPrice"]), price_prec))
-
         result = self._client.futures_private.place_order(payload)
 
-        # 開倉完成後補掛 TP 限價減倉單
-        if payload.get("tradeSide") == "OPEN" and tp_price is not None:
+        # 開倉後才補掛保護單
+        if payload.get("tradeSide") == "OPEN":
             side       = payload["side"]
             close_side = "BUY" if side == "SELL" else "SELL"
-            self._client.futures_private.place_order({
-                "symbol":     sym,
-                "side":       close_side,
-                "orderType":  "LIMIT",
-                "qty":        payload["qty"],
-                "price":      str(round(float(tp_price), price_prec)),
-                "effect":     "GTC",
-                "reduceOnly": True,
-            })
+            qty        = payload["qty"]
+
+            # 取得 positionId（tpsl 端點必填）
+            position_id = self._fetch_position_id(sym)
+
+            # 止損：tpsl 專用端點
+            if sl_price is not None and position_id:
+                try:
+                    self._client.futures_private.place_tpsl_order(
+                        symbol=sym,
+                        position_id=position_id,
+                        sl_price=round(float(sl_price), price_prec),
+                        sl_stop_type=sl_stop_type,
+                        sl_order_type=sl_order_type,
+                        sl_qty=qty,
+                    )
+                except Exception as e:
+                    logger.warning(f"[{sym}] 補掛 SL 失敗（主單已成交）: {e}")
+
+            # 止盈：普通限價減倉單
+            if tp_price is not None:
+                try:
+                    self._client.futures_private.place_order({
+                        "symbol":     sym,
+                        "side":       close_side,
+                        "orderType":  "LIMIT",
+                        "qty":        qty,
+                        "price":      str(round(float(tp_price), price_prec)),
+                        "effect":     "GTC",
+                        "reduceOnly": True,
+                    })
+                except Exception as e:
+                    logger.warning(f"[{sym}] 補掛 TP 失敗（主單已成交）: {e}")
 
         return result
+
+    def _fetch_position_id(self, symbol: str) -> str:
+        """開倉後查詢倉位取得 positionId（tpsl 端點必填）"""
+        time.sleep(0.3)  # 等交易所確認開倉
+        try:
+            positions = self._client.futures_private.get_pending_positions(symbol=symbol)
+            pos = next((p for p in positions if p.get("symbol") == symbol), None)
+            if pos:
+                return str(pos.get("positionId", ""))
+        except Exception as e:
+            logger.debug(f"[{symbol}] 查詢 positionId 失敗: {e}")
+        return ""
 
     def cancel_order(self, order_id: str, symbol: str) -> dict[str, Any]:
         if self._client.futures_private is None:

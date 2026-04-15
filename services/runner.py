@@ -608,8 +608,9 @@ class ServiceRunner:
             raise
         logger.info(f"[{self._symbol}] 開倉送出 orderId={result.get('orderId')}")
 
-        # 查詢實際成交價，避免 SL/TP 以信號價計算導致立即觸發
-        actual_entry = self._fetch_actual_entry(entry)
+        # 查詢實際成交價與 positionId
+        actual_entry, position_id = self._fetch_actual_entry(entry)
+        sl_tp_replaced = False
         if abs(actual_entry - entry) / entry > 0.001:  # 偏差 > 0.1% 時重算
             sl_pct = abs(sl - entry) / entry
             tp_pct = abs(tp - entry) / entry
@@ -624,9 +625,10 @@ class ServiceRunner:
                 f"重算 SL={sl:.4f} TP={tp:.4f}"
             )
             entry = actual_entry
+            sl_tp_replaced = True
 
         self._active_pos = ActivePosition(
-            position_id="",
+            position_id=position_id,
             side=side,
             entry_price=entry,
             qty=qty,
@@ -636,6 +638,24 @@ class ServiceRunner:
             exchange=self._exchange.name,
             interval=self._interval,
         )
+
+        # 若實際成交價與信號價偏差 > 0.1%，以重算後的 SL/TP 替換交易所上的保護單
+        if sl_tp_replaced and position_id:
+            try:
+                self._exchange.cancel_all_orders(self._symbol)
+                self._exchange.place_sl_tp_orders(
+                    symbol=self._symbol,
+                    side=side,
+                    qty=qty,
+                    sl_price=sl,
+                    tp_price=tp,
+                    position_id=position_id,
+                )
+                logger.info(
+                    f"[{self._symbol}] 已以實際成交價重新掛 SL/TP 保護單"
+                )
+            except Exception as e:
+                logger.warning(f"[{self._symbol}] 重掛 SL/TP 保護單失敗（信號價保護單仍有效）: {e}")
         pos_save(self._exchange.name, self._symbol, self._active_pos)
         logger.info(
             f"[{self._symbol}] 倉位建立 side={side} entry={entry:.4f} "
@@ -768,22 +788,25 @@ class ServiceRunner:
         self._active_pos = None
         pos_delete(self._exchange.name, self._symbol)
 
-    def _fetch_actual_entry(self, fallback: float) -> float:
-        """開倉後查詢交易所的實際成交價；失敗時回傳 fallback（信號價）"""
+    def _fetch_actual_entry(self, fallback: float) -> tuple[float, str]:
+        """
+        開倉後查詢交易所的實際成交價與 positionId。
+        回傳 (entry_price, position_id)；失敗時回傳 (fallback, "")。
+        """
         try:
-            import time as _time
-            _time.sleep(0.5)  # 等交易所確認成交
+            time.sleep(0.5)  # 等交易所確認成交
             positions = self._exchange.get_pending_positions(self._symbol)
             pos = next((p for p in positions if p.get("symbol") == self._symbol), None)
             if pos:
                 # Bitunix: avgOpenPrice；Binance: entryPrice
                 raw = pos.get("avgOpenPrice") or pos.get("entryPrice") or 0
                 price = float(raw)
+                position_id = str(pos.get("positionId", ""))
                 if price > 0:
-                    return price
+                    return price, position_id
         except Exception as e:
             logger.debug(f"[{self._symbol}] 查詢實際成交價失敗，使用信號價: {e}")
-        return fallback
+        return fallback, ""
 
     def _update_trailing_sl(
         self,

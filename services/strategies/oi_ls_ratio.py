@@ -8,18 +8,24 @@ OI + 多空比策略
 數據來源：Binance 公開期貨 API（不需要 Key），可跨交易所用於 Bitunix 下單。
 
 入場條件（做多）：
-  - 最近 N 期多空比趨勢下降（從高→低，空頭部位持續增加）
-  - 最近 N 期 OI 趨勢上升（新資金持續進場）
+  - 最近 N 期多空比趨勢下降（且方向一致性 >= 60%）
+  - 最近 N 期 OI 趨勢上升（且方向一致性 >= 60%）
   - 變化幅度均超過最低門檻
+  - RSI 未超買（< 65），避免追高
 
 出場條件：
   - 觸及止損或止盈
+  - 移動止損（從峰值回落 trail_pct）
   - 多空比方向反轉（空頭開始減少）
+
+止損冷卻：
+  - 幣種觸及止損後進入冷卻期（預設 2 小時），冷卻中不重新進場
 """
 
 from __future__ import annotations
 
 import logging
+import time
 
 from services.external_data.binance_futures import BinanceFuturesData
 from services.indicators import IndicatorSnapshot
@@ -28,12 +34,16 @@ from services.strategies.base import ActivePosition, BaseStrategy, Signal
 logger = logging.getLogger(__name__)
 
 # ── 可調整參數 ────────────────────────────────────────────────────────────────
-_LOOKBACK = 4            # 取幾期數據判斷趨勢（最少需要 2）
-_OI_MIN_CHANGE_PCT = 0.5    # OI 上升最少 0.5%
-_LS_MIN_CHANGE_PCT = 2.0    # 多空比變動最少 2%
-_SL_PCT = 0.015          # 初始止損 1.5%
-_TP_PCT = 0.030          # 止盈 3.0%
-_TRAIL_PCT = 0.015       # 移動止損：從峰值回落 1.5% 觸發
+_LOOKBACK = 5               # 取幾期數據判斷趨勢（最少需要 2）
+_OI_MIN_CHANGE_PCT = 1.5    # OI 上升最少 1.5%（原 0.5%，太容易觸發）
+_LS_MIN_CHANGE_PCT = 3.0    # 多空比變動最少 3.0%（原 2.0%）
+_MONOTONE_RATIO = 0.6       # 趨勢一致性要求：至少 60% 的期間方向正確
+_RSI_LONG_MAX = 65.0        # 做多時 RSI 不能超過此值（避免追高）
+_RSI_SHORT_MIN = 35.0       # 做空時 RSI 不能低於此值（避免追低）
+_SL_PCT = 0.015             # 初始止損 1.5%
+_TP_PCT = 0.030             # 止盈 3.0%
+_TRAIL_PCT = 0.015          # 移動止損：從峰值回落 1.5% 觸發
+_SL_COOLDOWN_HOURS = 2.0    # 止損觸發後同幣種冷卻時間（小時）
 
 # Binance OI/LS API 支援的最小 period
 _PERIOD_MAP = {
@@ -51,15 +61,38 @@ def _trend_change_pct(values: list[float]) -> float:
     return (values[-1] - values[0]) / values[0] * 100
 
 
+def _monotone_ratio(values: list[float], rising: bool) -> float:
+    """
+    計算趨勢一致性：連續期間中符合方向（上升/下降）的比例。
+    rising=True → 計算上升期間比例；rising=False → 下降期間比例。
+    values 由舊到新，長度 >= 2。
+    """
+    if len(values) < 2:
+        return 0.0
+    n_correct = 0
+    for i in range(1, len(values)):
+        delta = values[i] - values[i - 1]
+        if rising and delta > 0:
+            n_correct += 1
+        elif not rising and delta < 0:
+            n_correct += 1
+    return n_correct / (len(values) - 1)
+
+
 class OiLsRatioStrategy(BaseStrategy):
     """
     Args:
         period:           Binance API 抓取週期（自動對齊至支援的粒度）
-        lookback:         判斷趨勢所用的 K 線數
+        lookback:         判斷趨勢所用的期數
         oi_min_change:    OI 最低上升 % 門檻
         ls_min_change:    多空比最低變動 % 門檻
+        monotone_ratio:   趨勢一致性門檻（0~1，預設 0.6）
+        rsi_long_max:     做多時 RSI 上限
+        rsi_short_min:    做空時 RSI 下限
         sl_pct:           止損比例
         tp_pct:           止盈比例
+        trail_pct:        移動止損回撤比例
+        sl_cooldown_hours: 止損後同幣種冷卻時間（小時）
         data_provider:    外部注入（測試用），預設自動建立
     """
 
@@ -69,18 +102,28 @@ class OiLsRatioStrategy(BaseStrategy):
         lookback: int = _LOOKBACK,
         oi_min_change: float = _OI_MIN_CHANGE_PCT,
         ls_min_change: float = _LS_MIN_CHANGE_PCT,
+        monotone_ratio: float = _MONOTONE_RATIO,
+        rsi_long_max: float = _RSI_LONG_MAX,
+        rsi_short_min: float = _RSI_SHORT_MIN,
         sl_pct: float = _SL_PCT,
         tp_pct: float = _TP_PCT,
         trail_pct: float = _TRAIL_PCT,
+        sl_cooldown_hours: float = _SL_COOLDOWN_HOURS,
         data_provider: BinanceFuturesData | None = None,
     ) -> None:
         self._period = _PERIOD_MAP.get(period, period)
         self._lookback = max(lookback, 2)
         self._oi_min_change = oi_min_change
         self._ls_min_change = ls_min_change
+        self._monotone_ratio = monotone_ratio
+        self._rsi_long_max = rsi_long_max
+        self._rsi_short_min = rsi_short_min
         self._sl_pct = sl_pct
         self._tp_pct = tp_pct
         self._trail_pct = trail_pct
+        self._sl_cooldown_secs = sl_cooldown_hours * 3600
+        # symbol → 最後一次止損觸發的時間戳
+        self._sl_cooldown: dict[str, float] = {}
         self._data = data_provider or BinanceFuturesData()
 
     @property
@@ -99,6 +142,18 @@ class OiLsRatioStrategy(BaseStrategy):
     def _check_entry(self, snap: IndicatorSnapshot) -> Signal:
         symbol = self._resolve_symbol(snap)
 
+        # 止損冷卻期檢查
+        if symbol in self._sl_cooldown:
+            elapsed = time.time() - self._sl_cooldown[symbol]
+            if elapsed < self._sl_cooldown_secs:
+                remaining_h = (self._sl_cooldown_secs - elapsed) / 3600
+                return Signal(
+                    action="hold",
+                    reason=f"止損冷卻中（剩 {remaining_h:.1f}h）",
+                )
+            else:
+                del self._sl_cooldown[symbol]
+
         ls_data = self._data.get_ls_ratio_history(symbol, self._period, self._lookback)
         oi_data = self._data.get_oi_history(symbol, self._period, self._lookback)
 
@@ -112,13 +167,42 @@ class OiLsRatioStrategy(BaseStrategy):
         oi_change = _trend_change_pct(oi_values)   # 正 = OI 上升
 
         close = snap.close
+        rsi   = snap.rsi  # 可能為 None
+
         reason_base = (
             f"LS={ls_values[-1]:.3f}({ls_change:+.1f}%) "
             f"OI_chg={oi_change:+.1f}%"
+            + (f" RSI={rsi:.1f}" if rsi is not None else "")
         )
 
+        # OI 必須上升且達門檻
+        if oi_change < self._oi_min_change:
+            return Signal(
+                action="hold",
+                reason=f"OI 上升不足 {reason_base}（需 >={self._oi_min_change}%）",
+            )
+
+        # OI 趨勢一致性檢查
+        oi_mono = _monotone_ratio(oi_values, rising=True)
+        if oi_mono < self._monotone_ratio:
+            return Signal(
+                action="hold",
+                reason=f"OI 趨勢不一致 {reason_base}（一致性={oi_mono:.0%} < {self._monotone_ratio:.0%}）",
+            )
+
         # ── 做多：空頭增加 + OI 上升 → 軋空 ──────────────────────────────────
-        if ls_change <= -self._ls_min_change and oi_change >= self._oi_min_change:
+        if ls_change <= -self._ls_min_change:
+            ls_mono = _monotone_ratio(ls_values, rising=False)
+            if ls_mono < self._monotone_ratio:
+                return Signal(
+                    action="hold",
+                    reason=f"LS 下降趨勢不一致 {reason_base}（一致性={ls_mono:.0%}）",
+                )
+            if rsi is not None and rsi > self._rsi_long_max:
+                return Signal(
+                    action="hold",
+                    reason=f"RSI 超買，跳過做多 {reason_base}（RSI>{self._rsi_long_max}）",
+                )
             sl = round(close * (1 - self._sl_pct), 8)
             tp = round(close * (1 + self._tp_pct), 8)
             return Signal(
@@ -127,12 +211,24 @@ class OiLsRatioStrategy(BaseStrategy):
                 take_profit=tp,
                 reason=(
                     f"軋空訊號 {reason_base} "
+                    f"LS_mono={ls_mono:.0%} OI_mono={oi_mono:.0%} "
                     f"SL={sl:.4f} TP={tp:.4f}"
                 ),
             )
 
         # ── 做空：多頭增加 + OI 上升 → 軋多 ──────────────────────────────────
-        if ls_change >= self._ls_min_change and oi_change >= self._oi_min_change:
+        if ls_change >= self._ls_min_change:
+            ls_mono = _monotone_ratio(ls_values, rising=True)
+            if ls_mono < self._monotone_ratio:
+                return Signal(
+                    action="hold",
+                    reason=f"LS 上升趨勢不一致 {reason_base}（一致性={ls_mono:.0%}）",
+                )
+            if rsi is not None and rsi < self._rsi_short_min:
+                return Signal(
+                    action="hold",
+                    reason=f"RSI 超賣，跳過做空 {reason_base}（RSI<{self._rsi_short_min}）",
+                )
             sl = round(close * (1 + self._sl_pct), 8)
             tp = round(close * (1 - self._tp_pct), 8)
             return Signal(
@@ -141,13 +237,14 @@ class OiLsRatioStrategy(BaseStrategy):
                 take_profit=tp,
                 reason=(
                     f"軋多訊號 {reason_base} "
+                    f"LS_mono={ls_mono:.0%} OI_mono={oi_mono:.0%} "
                     f"SL={sl:.4f} TP={tp:.4f}"
                 ),
             )
 
         return Signal(
             action="hold",
-            reason=f"條件不足 {reason_base}（需 |LS|>={self._ls_min_change}% 且 OI>={self._oi_min_change}%）",
+            reason=f"條件不足 {reason_base}（需 |LS|>={self._ls_min_change}%）",
         )
 
     # ── 出場 ──────────────────────────────────────────────────────────────────
@@ -159,6 +256,7 @@ class OiLsRatioStrategy(BaseStrategy):
         if pos.side == "SELL":
             # 硬止損 / 止盈
             if close >= pos.stop_loss:
+                self._sl_cooldown[symbol] = time.time()
                 return Signal(action="close", reason=f"觸發止損 price={close:.4f} SL={pos.stop_loss:.4f}")
             if close <= pos.take_profit:
                 return Signal(action="close", reason=f"達到止盈 price={close:.4f} TP={pos.take_profit:.4f}")
@@ -184,6 +282,7 @@ class OiLsRatioStrategy(BaseStrategy):
         else:  # BUY
             # 硬止損 / 止盈
             if close <= pos.stop_loss:
+                self._sl_cooldown[symbol] = time.time()
                 return Signal(action="close", reason=f"觸發止損 price={close:.4f} SL={pos.stop_loss:.4f}")
             if close >= pos.take_profit:
                 return Signal(action="close", reason=f"達到止盈 price={close:.4f} TP={pos.take_profit:.4f}")
