@@ -69,6 +69,13 @@ class BaseExchange(ABC):
     def get_qty_precision(self, symbol: str) -> int:
         """回傳該交易對的數量小數位數（例如 BTC=3, ETH=2, SOL=1）"""
 
+    def set_leverage(self, symbol: str, leverage: int) -> None:
+        """
+        設定交易對槓桿倍數。
+        不支援的交易所保持預設（no-op）即可；
+        支援的子類應在開倉前呼叫此方法確保槓桿與 runner 設定一致。
+        """
+
     def get_funding_rate(self, symbol: str) -> float:
         """
         取得指定交易對的當前資金費率（十進位小數，例如 0.0001 = 0.01%）。

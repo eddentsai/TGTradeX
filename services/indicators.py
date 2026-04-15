@@ -71,6 +71,10 @@ class IndicatorSnapshot:
     vwap_upper: float | None = None  # VWAP + 1.5σ
     vwap_lower: float | None = None  # VWAP - 1.5σ
 
+    # 日內漲跌幅：current close vs 24h 前的 close（從 K 線反推）
+    # 正值 = 漲，負值 = 跌；K 線不足 24h 時為 None
+    change_24h_pct: float | None = None
+
 
 # ── 公開介面 ──────────────────────────────────────────────────────────────────
 
@@ -94,7 +98,7 @@ def candles_from_raw(data: list[dict]) -> list[Candle]:
     return result
 
 
-def compute_indicators(candles: list[Candle]) -> IndicatorSnapshot:
+def compute_indicators(candles: list[Candle], interval: str = "15m") -> IndicatorSnapshot:
     """計算所有指標，回傳最新一根 K 線的快照。candles 須由舊到新排列。"""
     if not candles:
         return IndicatorSnapshot(close=0.0, klines=[])
@@ -123,6 +127,9 @@ def compute_indicators(candles: list[Candle]) -> IndicatorSnapshot:
     vwap_std = vwap_data[1] if vwap_data else None
     vwap_upper = vwap + 1.5 * vwap_std if vwap and vwap_std else None
     vwap_lower = vwap - 1.5 * vwap_std if vwap and vwap_std else None
+
+    # 24h 漲跌幅：根據 K 線週期換算對應根數
+    change_24h_pct = _change_24h(closes, bars_per_day=_bars_per_day(interval))
 
     # 衍生 BB 指標
     bb_width_pct = None
@@ -163,6 +170,7 @@ def compute_indicators(candles: list[Candle]) -> IndicatorSnapshot:
         vwap=vwap,
         vwap_upper=vwap_upper,
         vwap_lower=vwap_lower,
+        change_24h_pct=change_24h_pct,
     )
 
 
@@ -417,3 +425,31 @@ def _calculate_vwap(
     std = math.sqrt(variance)
 
     return vwap, std
+
+
+_INTERVAL_MINUTES: dict[str, int] = {
+    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+    "1h": 60, "2h": 120, "4h": 240, "6h": 360, "12h": 720, "1d": 1440,
+}
+
+
+def _bars_per_day(interval: str) -> int:
+    """回傳指定週期下一天對應的 K 線根數（無法識別時預設 96 = 15m）。"""
+    minutes = _INTERVAL_MINUTES.get(interval, 15)
+    return max(1, 1440 // minutes)
+
+
+def _change_24h(closes: list[float], bars_per_day: int = 96) -> float | None:
+    """
+    計算 24h 漲跌幅（%）。
+    closes 由舊到新；bars_per_day 預設 96（15m 週期 × 96 = 24h）。
+    K 線數量 < bars_per_day+1 時，用最早的 close 做比較（至少需要 2 根）。
+    """
+    if len(closes) < 2:
+        return None
+    current = closes[-1]
+    ref_idx = max(0, len(closes) - 1 - bars_per_day)
+    ref = closes[ref_idx]
+    if ref == 0:
+        return None
+    return (current - ref) / ref * 100

@@ -17,6 +17,14 @@ class BitunixFuturesPrivateHttpApi:
         """取得帳戶資訊"""
         return self._get("/api/v1/futures/account", {"marginCoin": margin_coin})
 
+    def change_leverage(self, symbol: str, leverage: int, margin_coin: str = "USDT") -> dict:
+        """設定交易對槓桿"""
+        return self._post("/api/v1/futures/account/change_leverage", {
+            "symbol":     symbol,
+            "leverage":   leverage,
+            "marginCoin": margin_coin,
+        })
+
     # ── 交易 ──────────────────────────────────────────────────────────────────
 
     def place_order(self, order: dict) -> dict:

@@ -48,10 +48,11 @@
 - `get_pending_tpsl_orders` / `cancel_tpsl_order` — 查詢與取消 tpsl 條件單
 
 `BitunixExchange`（`adapter.py`）的重要邏輯：
-- `place_order`：自動剝離 `tpPrice/tpStopType/tpOrderType/tpOrderPrice` 欄位，開倉完成後補掛獨立限價減倉單作為 TP（maker 費率）；SL 使用 `slPrice` + `slStopType=MARK_PRICE`
-- `place_sl_tp_orders`：SL 呼叫 `place_tpsl_order`（條件市價單，需 `position_id`）；TP 補掛限價 `reduceOnly` 單
+- `place_order`：剝離**所有** SL/TP 欄位（`slPrice/slStopType/slOrderType/slOrderPrice/tpPrice/tpStopType/tpOrderType/tpOrderPrice`），只送出開倉單並立即返回；SL/TP 改由 `runner.py` 在取得實際成交價後呼叫 `place_sl_tp_orders` 補掛。這樣可避免 Bitunix `[30031]` 錯誤（開倉瞬間市價超過 SL 導致整筆單被拒）。
+- `set_leverage`：開倉前呼叫 `/api/v1/futures/account/change_leverage` 強制對齊槓桿，避免帳戶預設槓桿與 Runner 配置不符導致風險錯估。
+- `place_sl_tp_orders`：SL 呼叫 `place_tpsl_order`（條件市價單，需 `position_id`）；TP 補掛限價 `reduceOnly` 單（maker 費率）
 - `cancel_all_orders`：批次取消一般掛單，再逐筆取消 tpsl 條件單
-- `get_price_precision`：從 `quotePrecision`（或 `pricePrecision`/`priceDecimal`）欄位取得，用於 `slPrice` 對齊
+- `get_price_precision`：從 `quotePrecision`（或 `pricePrecision`/`priceDecimal`）欄位取得，用於價格對齊
 - `_get_pair_info`：快取交易對規格，避免重複 API 呼叫
 
 **`exchanges/binance/`**
@@ -136,6 +137,13 @@ redis-cli srem "tgtraderx:invalid_symbols:bitunix" ZECUSDT
 - `dry_run=True` 時只記錄，不呼叫 `place_order`
 - `stop()` 透過 `threading.Event` 通知主迴圈在當前週期後退出
 
+開倉流程（`_open_position`）重點：
+1. 若 `sizer` 可用，開倉前先呼叫 `exchange.set_leverage(symbol, leverage)` 強制對齊槓桿
+2. `place_order` 只送開倉單（SL/TP 已在 adapter 層剝離）
+3. 呼叫 `_fetch_actual_entry` 取得實際成交價與 `position_id`，再以實際價重算 SL/TP，最後呼叫 `place_sl_tp_orders` 補掛
+
+`_fetch_actual_entry` 實作重試邏輯：最多 4 次、每次間隔 0.5s（共最多 2s），解決市價單填充後倉位尚未出現在 API 的時序問題；所有嘗試失敗才 fallback 使用信號價。
+
 **倉位核對流程（`_reconcile_position`）**：
 
 | 情況 | 行為 |
@@ -169,6 +177,8 @@ redis-cli srem "tgtraderx:invalid_symbols:bitunix" ZECUSDT
 
 純函式模組，無任何副作用，僅依賴標準函式庫（無 numpy/pandas）。
 
+`compute_indicators(candles, interval="15m")` — 主入口，`interval` 參數用於計算 `bars_per_day`（各週期每日 K 線數：`15m`=96，`1h`=24，`4h`=6）。
+
 | 指標 | 週期 | 用途 |
 |------|------|------|
 | EMA | 20, 50, 200 | 趨勢方向、支撐阻力 |
@@ -180,6 +190,7 @@ redis-cli srem "tgtraderx:invalid_symbols:bitunix" ZECUSDT
 | 近期波動率 | 20 | 報酬率標準差（%）|
 | 成交量分佈（VA/POC）| 後 100 根 | 價值區上下限、最大成交量價位 |
 | VWAP | 後 24 根 | 成交量加權平均價 ± 1.5σ 帶（`vwap`, `vwap_upper`, `vwap_lower`）|
+| 24h 漲跌幅 | `bars_per_day` 根 | 當前收盤對 24h 前收盤的百分比變化（`change_24h_pct`）|
 
 EMA 和 ADX 使用 Wilder 平滑法（與多數交易所圖表一致）。
 
@@ -220,6 +231,9 @@ required_margin = position_value ÷ leverage
 | `DipVolumeStrategy` | HIGH_VOLATILITY | 近 5 根跌幅 > 3% + 量比 > 3x + 止跌確認（無新低+下影線）| 反彈至 EMA20 / TP +3% / SL -1.5% / 時間止損 10 根 |
 | `ConservativeStrategy` | DOWNTREND | 不入場 | 有倉位則平倉 |
 | `EnsembleStrategy` | 可選模式 | ≥ 2 個策略同時確認開倉；SL 取最高，TP 取最低（最保守）| 任一策略觸發出場即出場 |
+| `OiLsRatioStrategy` | 獨立運行 | OI 上升 ≥ 1.5% + 多空比朝擠壓方向變動 ≥ 3% + 單調性 ≥ 60% + RSI 過濾 + 24h 漲跌幅過濾 | SL/TP/移動止損；SL 後 2h 冷卻 |
+
+`OiLsRatioStrategy` 使用 Binance 公開 API 抓取 OI 與多空比，不依賴技術指標，可獨立於其他策略單獨部署（`run_mix_strategies.py`）。
 
 `ServiceRunner` 透過 `strategy` 參數接受外部注入的策略實例（例如 `EnsembleStrategy`）；`strategy=None` 時根據市場狀態自動切換。`RunnerManager` 的 `_build_strategy()` 負責根據 `enable_ensemble` 決定傳入哪種策略。
 
@@ -385,7 +399,7 @@ sudo systemctl enable --now redis-server
 - **分批出場未實作**：`DipVolumeStrategy` 和 `VwapPocStrategy` 的分批平倉邏輯（半倉/全倉）待 `Signal` 新增 `quantity_pct` 欄位後再啟用，目前一律全倉出場。
 - **Bitunix 山寨幣流動性偏低**：Bitunix 山寨幣成交量遠低於 Binance（第 8 名 TAO 僅約 5500 萬，同幣在 Binance 有 4.77 億）。建議永遠搭配 `--scan-exchange binance` 用 Binance 成交量排名，再取兩交易所上市的交集。
 - **未實作 WebSocket 確認成交**：目前 `place_order` 只確認訂單送出，不等待成交事件。`exchanges/bitunix/trading_flow.py` 有 `run_futures_trading_flow` 可做完整生命週期管理，未來可整合至 runner。
-- **position_id 延遲**：市價單填充後 position_id 需等下一週期才能從交易所取得。若需即時取得，可在開倉後加入短暫等待與即時查詢。
+- **position_id 延遲**：已透過 `_fetch_actual_entry` 的重試邏輯（最多 4 次 × 0.5s）緩解；若交易所回應仍慢於 2s，才會 fallback 使用信號價作為 SL/TP 計算基準。
 - **清算價為估算值**：孤立保證金模式下的清算價因交易所計算細節（維持保證金率、手續費）可能有誤差，實際以交易所顯示為準。
 - **單一帳戶**：每個交易所目前只支援一組 API key，未來可在 adapter 層擴充多帳戶。
 - **下降趨勢不做空**：`DOWNTREND` 目前對應 `ConservativeStrategy`，尚未實作空頭的趨勢跟隨。

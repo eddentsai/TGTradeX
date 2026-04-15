@@ -44,6 +44,8 @@ _SL_PCT = 0.015             # 初始止損 1.5%
 _TP_PCT = 0.030             # 止盈 3.0%
 _TRAIL_PCT = 0.015          # 移動止損：從峰值回落 1.5% 觸發
 _SL_COOLDOWN_HOURS = 2.0    # 止損觸發後同幣種冷卻時間（小時）
+_MAX_DAILY_GAIN_LONG = 15.0  # 做多時 24h 最大漲幅限制（超過此值不追高）
+_MAX_DAILY_DROP_SHORT = 15.0 # 做空時 24h 最大跌幅限制（已大跌則空頭過度擁擠）
 
 # Binance OI/LS API 支援的最小 period
 _PERIOD_MAP = {
@@ -82,18 +84,20 @@ def _monotone_ratio(values: list[float], rising: bool) -> float:
 class OiLsRatioStrategy(BaseStrategy):
     """
     Args:
-        period:           Binance API 抓取週期（自動對齊至支援的粒度）
-        lookback:         判斷趨勢所用的期數
-        oi_min_change:    OI 最低上升 % 門檻
-        ls_min_change:    多空比最低變動 % 門檻
-        monotone_ratio:   趨勢一致性門檻（0~1，預設 0.6）
-        rsi_long_max:     做多時 RSI 上限
-        rsi_short_min:    做空時 RSI 下限
-        sl_pct:           止損比例
-        tp_pct:           止盈比例
-        trail_pct:        移動止損回撤比例
-        sl_cooldown_hours: 止損後同幣種冷卻時間（小時）
-        data_provider:    外部注入（測試用），預設自動建立
+        period:              Binance API 抓取週期（自動對齊至支援的粒度）
+        lookback:            判斷趨勢所用的期數
+        oi_min_change:       OI 最低上升 % 門檻
+        ls_min_change:       多空比最低變動 % 門檻
+        monotone_ratio:      趨勢一致性門檻（0~1）；至少此比例的期間須方向一致
+        rsi_long_max:        做多時 RSI 上限；超過視為超買，跳過
+        rsi_short_min:       做空時 RSI 下限；低於視為超賣，跳過
+        sl_pct:              初始止損比例
+        tp_pct:              止盈比例
+        trail_pct:           移動止損：從峰值回落此比例觸發
+        sl_cooldown_hours:   止損觸發後同幣種冷卻時間（小時），冷卻中不再進場
+        max_daily_gain_long: 做多時 24h 漲幅上限；超過視為追高，跳過
+        max_daily_drop_short: 做空時 24h 跌幅上限（絕對值）；超過視為空頭擁擠，跳過
+        data_provider:       外部注入（測試用），預設自動建立
     """
 
     def __init__(
@@ -109,6 +113,8 @@ class OiLsRatioStrategy(BaseStrategy):
         tp_pct: float = _TP_PCT,
         trail_pct: float = _TRAIL_PCT,
         sl_cooldown_hours: float = _SL_COOLDOWN_HOURS,
+        max_daily_gain_long: float = _MAX_DAILY_GAIN_LONG,
+        max_daily_drop_short: float = _MAX_DAILY_DROP_SHORT,
         data_provider: BinanceFuturesData | None = None,
     ) -> None:
         self._period = _PERIOD_MAP.get(period, period)
@@ -122,6 +128,8 @@ class OiLsRatioStrategy(BaseStrategy):
         self._tp_pct = tp_pct
         self._trail_pct = trail_pct
         self._sl_cooldown_secs = sl_cooldown_hours * 3600
+        self._max_daily_gain_long = max_daily_gain_long
+        self._max_daily_drop_short = max_daily_drop_short
         # symbol → 最後一次止損觸發的時間戳
         self._sl_cooldown: dict[str, float] = {}
         self._data = data_provider or BinanceFuturesData()
@@ -167,12 +175,14 @@ class OiLsRatioStrategy(BaseStrategy):
         oi_change = _trend_change_pct(oi_values)   # 正 = OI 上升
 
         close = snap.close
-        rsi   = snap.rsi  # 可能為 None
+        rsi   = snap.rsi           # 可能為 None
+        chg24 = snap.change_24h_pct  # 可能為 None
 
         reason_base = (
             f"LS={ls_values[-1]:.3f}({ls_change:+.1f}%) "
             f"OI_chg={oi_change:+.1f}%"
             + (f" RSI={rsi:.1f}" if rsi is not None else "")
+            + (f" 24h={chg24:+.1f}%" if chg24 is not None else "")
         )
 
         # OI 必須上升且達門檻
@@ -203,6 +213,11 @@ class OiLsRatioStrategy(BaseStrategy):
                     action="hold",
                     reason=f"RSI 超買，跳過做多 {reason_base}（RSI>{self._rsi_long_max}）",
                 )
+            if chg24 is not None and chg24 > self._max_daily_gain_long:
+                return Signal(
+                    action="hold",
+                    reason=f"日內已大漲，跳過做多 {reason_base}（24h>{self._max_daily_gain_long:.0f}%）",
+                )
             sl = round(close * (1 - self._sl_pct), 8)
             tp = round(close * (1 + self._tp_pct), 8)
             return Signal(
@@ -228,6 +243,11 @@ class OiLsRatioStrategy(BaseStrategy):
                 return Signal(
                     action="hold",
                     reason=f"RSI 超賣，跳過做空 {reason_base}（RSI<{self._rsi_short_min}）",
+                )
+            if chg24 is not None and chg24 < -self._max_daily_drop_short:
+                return Signal(
+                    action="hold",
+                    reason=f"日內已大跌，跳過做空 {reason_base}（24h<-{self._max_daily_drop_short:.0f}%）",
                 )
             sl = round(close * (1 + self._sl_pct), 8)
             tp = round(close * (1 - self._tp_pct), 8)

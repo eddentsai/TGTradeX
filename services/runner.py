@@ -21,13 +21,8 @@ from services.position_store import save as pos_save
 from services.notifier import TelegramNotifier
 from services.risk_guard import RiskGuard
 from services.strategies.base import ActivePosition, BaseStrategy, Signal
-from services.strategies.conservative import ConservativeStrategy
-
-# 新增策略導入
 from services.strategies.dip_volume import DipVolumeStrategy
 from services.strategies.fibonacci import FibonacciStrategy
-from services.strategies.trend_following import TrendFollowingStrategy
-from services.strategies.volume_profile import VolumeProfileStrategy
 from services.strategies.vwap_poc import VwapPocStrategy
 
 logger = logging.getLogger(__name__)
@@ -291,8 +286,8 @@ class ServiceRunner:
             logger.warning(f"K 線數量不足 ({len(candles)} 根)，跳過")
             return
 
-        # 2. 計算指標（傳入原始 K 線數據）
-        snap = compute_indicators(candles)
+        # 2. 計算指標（傳入原始 K 線數據與週期，讓 change_24h_pct 正確換算根數）
+        snap = compute_indicators(candles, interval=self._interval)
         snap.symbol = self._symbol
 
         # 3. 識別市場狀態
@@ -539,6 +534,11 @@ class ServiceRunner:
 
         side = "BUY" if signal.action == "open_long" else "SELL"
 
+        # ── 設定槓桿（確保與 runner 設定一致，避免使用帳戶預設槓桿）────────────
+        leverage = self._sizer.leverage if self._sizer else None
+        if leverage is not None:
+            self._exchange.set_leverage(self._symbol, int(leverage))
+
         # ── 計算開倉數量 ──────────────────────────────────────────────────────
         qty, size_result = self._resolve_qty(snap, signal, side)
         if qty is None:
@@ -608,24 +608,24 @@ class ServiceRunner:
             raise
         logger.info(f"[{self._symbol}] 開倉送出 orderId={result.get('orderId')}")
 
-        # 查詢實際成交價與 positionId
+        # 查詢實際成交價與 positionId（單次查詢，0.5s 後交易所應已確認開倉）
         actual_entry, position_id = self._fetch_actual_entry(entry)
-        sl_tp_replaced = False
-        if abs(actual_entry - entry) / entry > 0.001:  # 偏差 > 0.1% 時重算
-            sl_pct = abs(sl - entry) / entry
-            tp_pct = abs(tp - entry) / entry
-            if side == "BUY":
-                sl = round(actual_entry * (1 - sl_pct), 8)
-                tp = round(actual_entry * (1 + tp_pct), 8)
-            else:
-                sl = round(actual_entry * (1 + sl_pct), 8)
-                tp = round(actual_entry * (1 - tp_pct), 8)
+
+        # 以實際成交價重算 SL/TP（消除信號價與成交價的偏差）
+        sl_pct = abs(sl - entry) / entry
+        tp_pct = abs(tp - entry) / entry
+        if side == "BUY":
+            sl = round(actual_entry * (1 - sl_pct), 8)
+            tp = round(actual_entry * (1 + tp_pct), 8)
+        else:
+            sl = round(actual_entry * (1 + sl_pct), 8)
+            tp = round(actual_entry * (1 - tp_pct), 8)
+        if abs(actual_entry - entry) / entry > 0.001:
             logger.info(
                 f"[{self._symbol}] 實際成交價 {actual_entry:.4f}（信號價 {entry:.4f}），"
                 f"重算 SL={sl:.4f} TP={tp:.4f}"
             )
-            entry = actual_entry
-            sl_tp_replaced = True
+        entry = actual_entry
 
         self._active_pos = ActivePosition(
             position_id=position_id,
@@ -639,10 +639,9 @@ class ServiceRunner:
             interval=self._interval,
         )
 
-        # 若實際成交價與信號價偏差 > 0.1%，以重算後的 SL/TP 替換交易所上的保護單
-        if sl_tp_replaced and position_id:
+        # 掛交易所保護單（SL/TP 均以實際成交價為基準）
+        if position_id:
             try:
-                self._exchange.cancel_all_orders(self._symbol)
                 self._exchange.place_sl_tp_orders(
                     symbol=self._symbol,
                     side=side,
@@ -652,10 +651,16 @@ class ServiceRunner:
                     position_id=position_id,
                 )
                 logger.info(
-                    f"[{self._symbol}] 已以實際成交價重新掛 SL/TP 保護單"
+                    f"[{self._symbol}] SL/TP 保護單已掛 SL={sl:.4f} TP={tp:.4f}"
                 )
             except Exception as e:
-                logger.warning(f"[{self._symbol}] 重掛 SL/TP 保護單失敗（信號價保護單仍有效）: {e}")
+                logger.warning(
+                    f"[{self._symbol}] 掛 SL/TP 保護單失敗，下次週期將補掛: {e}"
+                )
+        else:
+            logger.warning(
+                f"[{self._symbol}] 無法取得 positionId，SL/TP 暫未掛單，下次週期將補掛"
+            )
         pos_save(self._exchange.name, self._symbol, self._active_pos)
         logger.info(
             f"[{self._symbol}] 倉位建立 side={side} entry={entry:.4f} "
@@ -788,24 +793,51 @@ class ServiceRunner:
         self._active_pos = None
         pos_delete(self._exchange.name, self._symbol)
 
-    def _fetch_actual_entry(self, fallback: float) -> tuple[float, str]:
+    def _fetch_actual_entry(
+        self,
+        fallback: float,
+        max_retries: int = 4,
+        retry_delay: float = 0.5,
+    ) -> tuple[float, str]:
         """
         開倉後查詢交易所的實際成交價與 positionId。
-        回傳 (entry_price, position_id)；失敗時回傳 (fallback, "")。
+        回傳 (entry_price, position_id)；全部重試失敗時回傳 (fallback, "")。
+
+        第一次在 retry_delay 秒後查詢；若交易所尚未建立倉位（高負載情境），
+        每隔 retry_delay 秒重試，最多 max_retries 次。
         """
-        try:
-            time.sleep(0.5)  # 等交易所確認成交
-            positions = self._exchange.get_pending_positions(self._symbol)
-            pos = next((p for p in positions if p.get("symbol") == self._symbol), None)
-            if pos:
-                # Bitunix: avgOpenPrice；Binance: entryPrice
-                raw = pos.get("avgOpenPrice") or pos.get("entryPrice") or 0
-                price = float(raw)
-                position_id = str(pos.get("positionId", ""))
-                if price > 0:
-                    return price, position_id
-        except Exception as e:
-            logger.debug(f"[{self._symbol}] 查詢實際成交價失敗，使用信號價: {e}")
+        for attempt in range(1, max_retries + 1):
+            time.sleep(retry_delay)
+            try:
+                positions = self._exchange.get_pending_positions(self._symbol)
+                pos = next(
+                    (p for p in positions if p.get("symbol") == self._symbol), None
+                )
+                if pos:
+                    raw = pos.get("avgOpenPrice") or pos.get("entryPrice") or 0
+                    price = float(raw)
+                    position_id = str(pos.get("positionId", ""))
+                    if price > 0:
+                        if attempt > 1:
+                            logger.debug(
+                                f"[{self._symbol}] 第 {attempt} 次查詢取得實際成交價"
+                            )
+                        return price, position_id
+                # 倉位尚未出現，繼續重試
+                if attempt < max_retries:
+                    logger.debug(
+                        f"[{self._symbol}] 倉位尚未建立，{retry_delay}s 後重試"
+                        f"（{attempt}/{max_retries}）"
+                    )
+            except Exception as e:
+                if attempt == max_retries:
+                    logger.warning(
+                        f"[{self._symbol}] 查詢實際成交價失敗，使用信號價: {e}"
+                    )
+                else:
+                    logger.debug(
+                        f"[{self._symbol}] 查詢失敗，{retry_delay}s 後重試: {e}"
+                    )
         return fallback, ""
 
     def _update_trailing_sl(

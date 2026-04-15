@@ -6,7 +6,6 @@ Bitunix 交易所 Adapter
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
 
 from exchanges.base import BaseExchange
@@ -61,58 +60,17 @@ class BitunixExchange(BaseExchange):
         payload.pop("tpOrderPrice", None)
 
         result = self._client.futures_private.place_order(payload)
-
-        # 開倉後才補掛保護單
-        if payload.get("tradeSide") == "OPEN":
-            side       = payload["side"]
-            close_side = "BUY" if side == "SELL" else "SELL"
-            qty        = payload["qty"]
-
-            # 取得 positionId（tpsl 端點必填）
-            position_id = self._fetch_position_id(sym)
-
-            # 止損：tpsl 專用端點
-            if sl_price is not None and position_id:
-                try:
-                    self._client.futures_private.place_tpsl_order(
-                        symbol=sym,
-                        position_id=position_id,
-                        sl_price=round(float(sl_price), price_prec),
-                        sl_stop_type=sl_stop_type,
-                        sl_order_type=sl_order_type,
-                        sl_qty=qty,
-                    )
-                except Exception as e:
-                    logger.warning(f"[{sym}] 補掛 SL 失敗（主單已成交）: {e}")
-
-            # 止盈：普通限價減倉單
-            if tp_price is not None:
-                try:
-                    self._client.futures_private.place_order({
-                        "symbol":     sym,
-                        "side":       close_side,
-                        "orderType":  "LIMIT",
-                        "qty":        qty,
-                        "price":      str(round(float(tp_price), price_prec)),
-                        "effect":     "GTC",
-                        "reduceOnly": True,
-                    })
-                except Exception as e:
-                    logger.warning(f"[{sym}] 補掛 TP 失敗（主單已成交）: {e}")
-
         return result
 
-    def _fetch_position_id(self, symbol: str) -> str:
-        """開倉後查詢倉位取得 positionId（tpsl 端點必填）"""
-        time.sleep(0.3)  # 等交易所確認開倉
+    def set_leverage(self, symbol: str, leverage: int) -> None:
+        """開倉前設定槓桿，確保與 runner 設定一致"""
+        if self._client.futures_private is None:
+            raise RuntimeError("未設定 Bitunix credentials")
         try:
-            positions = self._client.futures_private.get_pending_positions(symbol=symbol)
-            pos = next((p for p in positions if p.get("symbol") == symbol), None)
-            if pos:
-                return str(pos.get("positionId", ""))
+            self._client.futures_private.change_leverage(symbol, leverage)
+            logger.debug(f"[{symbol}] 槓桿已設定為 {leverage}x")
         except Exception as e:
-            logger.debug(f"[{symbol}] 查詢 positionId 失敗: {e}")
-        return ""
+            logger.warning(f"[{symbol}] 設定槓桿失敗（繼續開倉）: {e}")
 
     def cancel_order(self, order_id: str, symbol: str) -> dict[str, Any]:
         if self._client.futures_private is None:
