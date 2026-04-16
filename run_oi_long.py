@@ -160,6 +160,50 @@ def main() -> None:
         help="多空比較進場上升此比例時出場 %（預設 10.0）",
     )
     parser.add_argument(
+        "--min-filter-confirm",
+        type=int,
+        default=2,
+        help="附加 filter（FR/BB/LQ/VS）需通過幾個才進場（預設 2，最大等於啟用數量）",
+    )
+    parser.add_argument(
+        "--no-funding-filter",
+        action="store_true",
+        help="停用資金費率負值確認 filter",
+    )
+    parser.add_argument(
+        "--no-bb-squeeze",
+        action="store_true",
+        help="停用 BB 緊縮確認 filter",
+    )
+    parser.add_argument(
+        "--no-liq-filter",
+        action="store_true",
+        help="停用空單清算量確認 filter",
+    )
+    parser.add_argument(
+        "--no-vol-shrink",
+        action="store_true",
+        help="停用成交量萎縮確認 filter",
+    )
+    parser.add_argument(
+        "--funding-periods",
+        type=int,
+        default=2,
+        help="資金費率需為負值的連續期數（預設 2）",
+    )
+    parser.add_argument(
+        "--min-liq-usdt",
+        type=float,
+        default=50_000,
+        help="近期空單清算量門檻 USDT（預設 50000）",
+    )
+    parser.add_argument(
+        "--vol-shrink-ratio",
+        type=float,
+        default=0.75,
+        help="成交量萎縮比例門檻（預設 0.75，即近期量 < 前期 75%%）",
+    )
+    parser.add_argument(
         "--trail-activate",
         type=float,
         default=15.0,
@@ -260,6 +304,14 @@ def main() -> None:
         ls_shift_pct=args.ls_shift_pct / 100,
         trail_activate_pct=args.trail_activate / 100,
         trail_distance_pct=args.trail_distance / 100,
+        use_funding_filter=not args.no_funding_filter,
+        use_bb_squeeze=not args.no_bb_squeeze,
+        use_liq_filter=not args.no_liq_filter,
+        use_vol_shrink=not args.no_vol_shrink,
+        min_filter_confirm=args.min_filter_confirm,
+        funding_periods=args.funding_periods,
+        min_liq_usdt=args.min_liq_usdt,
+        vol_shrink_ratio=args.vol_shrink_ratio,
         period=args.interval,
     )
 

@@ -4,6 +4,8 @@ Binance 公開期貨數據抓取器（不需要 API Key）
 提供：
   - 多空比歷史（globalLongShortAccountRatio）
   - 持倉量歷史（openInterestHist）
+  - 資金費率歷史（fundingRate）
+  - 近期強平清算量（allForceOrders）
 
 支援的 period：5m / 15m / 30m / 1h / 2h / 4h / 6h / 12h / 1d
 """
@@ -108,6 +110,79 @@ class BinanceFuturesData:
         except Exception as e:
             logger.debug(f"[BinanceFutures] OI 取得失敗 {symbol}: {e}")
             return None
+
+    def get_funding_rate_history(
+        self, symbol: str, limit: int = 5
+    ) -> list[dict] | None:
+        """
+        取得資金費率歷史（由舊到新）。
+
+        Returns:
+            list of dict: [{"fundingRate": float, "fundingTime": int}, ...]
+            None: API 失敗
+        """
+        key = f"fr:{symbol}:{limit}"
+        cached = self._get_cache(key)
+        if cached is not None:
+            return cached
+
+        try:
+            resp = requests.get(
+                f"{_BASE_URL}/fapi/v1/fundingRate",
+                params={"symbol": symbol, "limit": limit},
+                timeout=_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = [
+                {
+                    "fundingRate": float(r["fundingRate"]),
+                    "fundingTime": int(r["fundingTime"]),
+                }
+                for r in resp.json()
+            ]
+            self._set_cache(key, data)
+            return data
+        except Exception as e:
+            logger.debug(f"[BinanceFutures] 資金費率取得失敗 {symbol}: {e}")
+            return None
+
+    def get_recent_liquidations(
+        self, symbol: str, limit: int = 50
+    ) -> float:
+        """
+        取得近期空單強平量（USDT）。
+
+        Binance allForceOrders 中，side=BUY 代表空倉被強平（交易所買入平空）。
+        將這些訂單的 price × executedQty 加總即為空單清算 USDT 量。
+
+        Returns:
+            float: 空單清算 USDT 量；API 失敗時回傳 0.0
+        """
+        key = f"liq:{symbol}:{limit}"
+        cached = self._get_cache(key)
+        if cached is not None:
+            return cached
+
+        try:
+            resp = requests.get(
+                f"{_BASE_URL}/fapi/v1/allForceOrders",
+                params={"symbol": symbol, "limit": limit},
+                timeout=_TIMEOUT,
+            )
+            resp.raise_for_status()
+            orders = resp.json()
+            # side=BUY → 空倉被強平（我們關注的方向）
+            liq_usdt = sum(
+                float(o.get("averagePrice", 0) or o.get("price", 0))
+                * float(o.get("executedQty", 0))
+                for o in orders
+                if o.get("side") == "BUY"
+            )
+            self._set_cache(key, liq_usdt)
+            return liq_usdt
+        except Exception as e:
+            logger.debug(f"[BinanceFutures] 強平清算取得失敗 {symbol}: {e}")
+            return 0.0
 
     # ── 快取 ─────────────────────────────────────────────────────────────────
 
