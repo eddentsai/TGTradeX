@@ -6,14 +6,15 @@
 
 ## 專案目標
 
-提供三種期貨交易自動化模式：
+提供四種期貨交易自動化模式：
 
-1. **Ensemble 多策略掃描服務**（`run_mix_strategies.py`）：自動掃描高流動性山寨幣，三策略多數決開倉，推薦用於山寨幣交易
-2. **自動掃描交易服務**（`run_auto.py`）：自動掃描並依市場狀態自動切換策略，適合市場狀態較明確時
-3. **單一幣種自動服務**（`run_service.py`）：固定監控指定幣種，自動識別市場狀態、切換策略、計算倉位並下單
-4. **Telegram Bot**（`main.py`）：接收使用者文字指令，手動控制開平倉
+1. **OI 背離做多服務**（`run_oi_long.py`）：波動性掃描 + OI 48h 背離篩選，只做多，結構性出場（bn.sh / bu.sh 使用）
+2. **Ensemble 多策略掃描服務**（`run_mix_strategies.py`）：自動掃描高流動性山寨幣，三策略多數決開倉，雙向交易
+3. **自動掃描交易服務**（`run_auto.py`）：自動掃描並依市場狀態自動切換策略
+4. **單一幣種自動服務**（`run_service.py`）：固定監控指定幣種，自動識別市場狀態、切換策略
+5. **Telegram Bot**（`main.py`）：接收使用者文字指令，手動控制開平倉
 
-三者共用 `exchanges/` 層，互不干擾，可同時運行。
+所有服務共用 `exchanges/` 層，互不干擾，可同時運行。
 
 ---
 
@@ -77,6 +78,7 @@
 - `trade_exchange`：實際下單用的交易所；若與 `exchange` 不同，掃描結果自動取兩邊的**上市交集**，避免掃到下單交易所沒有的合約
 - `min_quote_vol`：24h 最低 USDT 成交量門檻
 - `max_change_pct`：24h 漲跌幅絕對值上限（預設 40%）；超過此值表示近期出現異常行情（例如上幣炒作或崩盤），K 線形態已失真，排除
+- `sort_by`：排序方式，`"volume"`（24h 成交量，預設）或 `"volatility"`（24h 高低振幅 %，用於 OI 背離服務）
 
 過濾規則（依序）：
 1. 必須以 `USDT` 結尾
@@ -97,6 +99,18 @@ scanner = SymbolScanner(
     max_change_pct=40.0,
 )
 ```
+
+**`services/oi_divergence.py`**
+
+`OiDivergenceFilter` 從候選幣種中篩選出 OI 大幅累積但價格尚未反應的幣種。
+
+- 呼叫 `BinanceFuturesData.get_oi_history(symbol, period="1h", limit=49)` 取 48h OI 歷史
+- 呼叫 `exchange.get_klines(symbol, "1h", limit=49)` 取 48h 價格變化
+- 預設門檻（嚴格版）：OI 48h > +20%，價格 48h < ±3%
+- 已持倉幣種無條件保留，不受篩選影響
+- 每筆 symbol 間加 0.2s 延遲，避免觸發 Binance 速率限制
+
+`run_oi_long.py` 使用 `_OiFilteredScanner` 包裝器將 `SymbolScanner`（`sort_by="volatility"`）與 `OiDivergenceFilter` 串接，RunnerManager 呼叫 `scanner.scan()` 時自動完成兩層篩選，無需修改 RunnerManager。
 
 **`services/runner_manager.py`**
 
@@ -232,8 +246,11 @@ required_margin = position_value ÷ leverage
 | `ConservativeStrategy` | DOWNTREND | 不入場 | 有倉位則平倉 |
 | `EnsembleStrategy` | 可選模式 | ≥ 2 個策略同時確認開倉；SL 取最高，TP 取最低（最保守）| 任一策略觸發出場即出場 |
 | `OiLsRatioStrategy` | 獨立運行 | OI 上升 ≥ 1.5% + 多空比朝擠壓方向變動 ≥ 3% + 單調性 ≥ 60% + RSI 過濾 + 24h 漲跌幅過濾 | SL/TP/移動止損；SL 後 2h 冷卻 |
+| `LongOnlyOiStrategy` | 獨立運行 | OI 背離預篩後：收盤 > EMA20 + RSI < 70 | 硬止損 -20%；OI 從峰值跌 >5%；多空比較進場漲 >10%；無固定 TP |
 
-`OiLsRatioStrategy` 使用 Binance 公開 API 抓取 OI 與多空比，不依賴技術指標，可獨立於其他策略單獨部署（`run_mix_strategies.py`）。
+`OiLsRatioStrategy`：Binance 公開 API 抓 OI + 多空比，雙向交易，用於 `run_mix_strategies.py`。
+
+`LongOnlyOiStrategy`：僅做多，依賴 `OiDivergenceFilter` 預篩選（OI 48h > +20%、價格 < ±3%），出場由 OI/多空比結構決定而非固定 TP，用於 `run_oi_long.py`（bn.sh / bu.sh）。
 
 `ServiceRunner` 透過 `strategy` 參數接受外部注入的策略實例（例如 `EnsembleStrategy`）；`strategy=None` 時根據市場狀態自動切換。`RunnerManager` 的 `_build_strategy()` 負責根據 `enable_ensemble` 決定傳入哪種策略。
 
@@ -292,6 +309,29 @@ TG Bot 的應用層，協調 bot 和 exchanges 之間的流程。
 ---
 
 ## 資料流
+
+### OI 背離做多模式（`run_oi_long.py`）
+
+```
+run_oi_long.py
+    │ 組裝 trade_exchange + scan_exchange(Binance) + OiFilteredScanner + sizer + manager
+    ▼
+RunnerManager.run() — 每 scan_interval 秒掃描一次
+    │
+    ├─ _OiFilteredScanner.scan()
+    │       ├─ SymbolScanner.scan()       按振幅排序，取前 top_volatile 名
+    │       └─ OiDivergenceFilter.filter() OI 48h > +20% 且 價格 < ±3%
+    └─ 為通過篩選的幣種啟動 ServiceRunner 執行緒
+            │
+            ▼  （各執行緒獨立，每根 K 線執行一次）
+        ServiceRunner._run_cycle()
+            ├─ exchange.get_klines()
+            ├─ compute_indicators(interval)
+            ├─ LongOnlyOiStrategy.on_candle()
+            │       ├─ 無持倉：close > EMA20 + RSI < 70 → open_long
+            │       └─ 有持倉：監控 OI/LS → hold 或 close
+            └─ exchange.place_order() + place_sl_tp_orders()
+```
 
 ### 自動掃描模式（`run_auto.py`）
 
