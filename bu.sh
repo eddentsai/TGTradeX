@@ -1,5 +1,5 @@
 #!/bin/bash
-# TGTradeX — Bitunix 山寨幣掃描服務管理腳本
+# TGTradeX — Bitunix OI 背離做多服務管理腳本
 #
 # 用法: ./bu.sh {start|stop|restart|log|status}
 #
@@ -13,13 +13,12 @@ LOG_DIR="logs"
 ARCHIVE_DIR="$LOG_DIR/bu"
 mkdir -p "$LOG_DIR" "$ARCHIVE_DIR"
 
-NAME="auto_bu"
+NAME="oi_bu"
 LOG_FILE="$LOG_DIR/${NAME}.log"
 PID_FILE="$LOG_DIR/${NAME}.pid"
 
-SERVICE_ARGS="--exchange bitunix --max-positions 3 --min-volume=100000 \
-    --leverage 4 --risk-pct 0.8 --interval 15m --scan-interval 3600 \
-    --strategies oi_ls_ratio"
+SERVICE_ARGS="--exchange bitunix --max-positions 3 \
+    --leverage 2 --risk-pct 1.0 --interval 1h --scan-interval 3600"
 
 # ── 工具函式 ───────────────────────────────────────────────────────────────────
 
@@ -43,7 +42,7 @@ do_start() {
 
     archive_log
     touch "$LOG_FILE"
-    nohup python -u run_mix_strategies.py $SERVICE_ARGS \
+    nohup python -u run_oi_long.py $SERVICE_ARGS \
         > "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
     echo "  啟動（PID=$!  log=$LOG_FILE）"
@@ -79,20 +78,20 @@ CMD="${1:-help}"
 
 case "$CMD" in
     start)
-        echo "▶  啟動 Bitunix 山寨幣掃描服務..."
+        echo "▶  啟動 Bitunix OI 背離做多服務..."
         do_start
         echo "─────────────────────────────"
         do_status
         ;;
 
     stop)
-        echo "■  停止 Bitunix 山寨幣掃描服務..."
+        echo "■  停止 Bitunix OI 背離做多服務..."
         do_stop
         echo "完成。"
         ;;
 
     restart)
-        echo "↺  重啟 Bitunix 山寨幣掃描服務..."
+        echo "↺  重啟 Bitunix OI 背離做多服務..."
         echo "── 停止 ──────────────────────"
         do_stop
         echo "── 等待程序退出（12s）────────"

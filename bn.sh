@@ -1,109 +1,75 @@
 #!/bin/bash
-# TGTradeX — Binance 主流幣服務管理腳本
+# TGTradeX — Binance OI 背離做多服務管理腳本
 #
 # 用法: ./bn.sh {start|stop|restart|log|status}
 #
-#   start   — 啟動所有幣種（已在運行者自動略過）
-#   stop    — 停止所有幣種
+#   start   — 啟動服務（已在運行則略過）
+#   stop    — 停止服務
 #   restart — 停止後重新啟動
-#   log     — 即時查看所有 log（Ctrl-C 離開）
-#   status  — 顯示各幣種運行狀態
+#   log     — 即時查看 log（Ctrl-C 離開）
+#   status  — 顯示運行狀態
 
 LOG_DIR="logs"
 ARCHIVE_DIR="$LOG_DIR/bn"
 mkdir -p "$LOG_DIR" "$ARCHIVE_DIR"
 
-# ── 幣種設定 ───────────────────────────────────────────────────────────────────
-# 格式：NAMES / SYMBOLS / DELAYS 三個陣列對應索引相同
-NAMES=(btc eth sol bnb)
-SYMBOLS=(BTCUSDT ETHUSDT SOLUSDT BNBUSDT)
-DELAYS=(0 5 10 15)          # 錯開啟動秒數，避免同時打 API
+NAME="oi_bn"
+LOG_FILE="$LOG_DIR/${NAME}.log"
+PID_FILE="$LOG_DIR/${NAME}.pid"
 
-COMMON_ARGS="--exchange binance --leverage 3 --risk-pct 1 --interval 4h"
+SERVICE_ARGS="--exchange binance --max-positions 3 \
+    --leverage 2 --risk-pct 1.0 --interval 4h --scan-interval 3600"
 
 # ── 工具函式 ───────────────────────────────────────────────────────────────────
 
-pid_file() { echo "$LOG_DIR/bn_${1}.pid"; }
-log_file() { echo "$LOG_DIR/bn_${1}.log"; }
-
 is_running() {
-    local pf; pf=$(pid_file "$1")
-    [[ -f "$pf" ]] && kill -0 "$(cat "$pf")" 2>/dev/null
+    [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
 }
 
 archive_log() {
-    local name="$1"
-    local lf; lf=$(log_file "$name")
-    if [[ -s "$lf" ]]; then
+    if [[ -s "$LOG_FILE" ]]; then
         local ts; ts=$(date +"%Y%m%d_%H%M%S")
-        mv "$lf" "$ARCHIVE_DIR/bn_${name}_${ts}.log"
-        echo "  [bn_${name}] 舊 log 已封存 → $ARCHIVE_DIR/bn_${name}_${ts}.log"
+        mv "$LOG_FILE" "$ARCHIVE_DIR/${NAME}_${ts}.log"
+        echo "  舊 log 已封存 → $ARCHIVE_DIR/${NAME}_${ts}.log"
     fi
-}
-
-start_one() {
-    local name="$1" symbol="$2" delay="$3"
-    local pf; pf=$(pid_file "$name")
-    local lf; lf=$(log_file "$name")
-
-    if is_running "$name"; then
-        echo "  [$symbol] 已在運行（PID=$(cat "$pf")），略過"
-        return
-    fi
-
-    archive_log "$name"
-    touch "$lf"
-    nohup python -u run_service.py \
-        $COMMON_ARGS \
-        --symbol "$symbol" \
-        --start-delay "$delay" \
-        > "$lf" 2>&1 &
-    echo $! > "$pf"
-    echo "  [$symbol] 啟動（PID=$!  log=$lf）"
-}
-
-stop_one() {
-    local name="$1" symbol="$2"
-    local pf; pf=$(pid_file "$name")
-
-    if ! is_running "$name"; then
-        echo "  [$symbol] 未在運行"
-        rm -f "$pf"
-        return
-    fi
-
-    local pid; pid=$(cat "$pf")
-    if kill "$pid" 2>/dev/null; then
-        echo "  [$symbol] 停止信號已送出（PID=$pid）"
-    else
-        echo "  [$symbol] 停止失敗（PID=$pid）"
-    fi
-    rm -f "$pf"
 }
 
 do_start() {
-    for i in "${!NAMES[@]}"; do
-        start_one "${NAMES[$i]}" "${SYMBOLS[$i]}" "${DELAYS[$i]}"
-    done
+    if is_running; then
+        echo "  已在運行（PID=$(cat "$PID_FILE")），略過"
+        return
+    fi
+
+    archive_log
+    touch "$LOG_FILE"
+    nohup python -u run_oi_long.py $SERVICE_ARGS \
+        > "$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
+    echo "  啟動（PID=$!  log=$LOG_FILE）"
 }
 
 do_stop() {
-    for i in "${!NAMES[@]}"; do
-        stop_one "${NAMES[$i]}" "${SYMBOLS[$i]}"
-    done
+    if ! is_running; then
+        echo "  未在運行"
+        rm -f "$PID_FILE"
+        return
+    fi
+
+    local pid; pid=$(cat "$PID_FILE")
+    if kill "$pid" 2>/dev/null; then
+        echo "  停止信號已送出（PID=$pid）"
+    else
+        echo "  停止失敗（PID=$pid）"
+    fi
+    rm -f "$PID_FILE"
 }
 
 do_status() {
-    for i in "${!NAMES[@]}"; do
-        local name="${NAMES[$i]}" symbol="${SYMBOLS[$i]}"
-        local pf; pf=$(pid_file "$name")
-        if is_running "$name"; then
-            printf "  [%-10s] ✓ 運行中  PID=%-8s  log=%s\n" \
-                "$symbol" "$(cat "$pf")" "$(log_file "$name")"
-        else
-            printf "  [%-10s] ✗ 未運行\n" "$symbol"
-        fi
-    done
+    if is_running; then
+        printf "  ✓ 運行中  PID=%-8s  log=%s\n" "$(cat "$PID_FILE")" "$LOG_FILE"
+    else
+        printf "  ✗ 未運行\n"
+    fi
 }
 
 # ── 主指令 ────────────────────────────────────────────────────────────────────
@@ -112,20 +78,20 @@ CMD="${1:-help}"
 
 case "$CMD" in
     start)
-        echo "▶  啟動 Binance 主流幣服務..."
+        echo "▶  啟動 Binance OI 背離做多服務..."
         do_start
         echo "─────────────────────────────"
         do_status
         ;;
 
     stop)
-        echo "■  停止 Binance 主流幣服務..."
+        echo "■  停止 Binance OI 背離做多服務..."
         do_stop
         echo "完成。"
         ;;
 
     restart)
-        echo "↺  重啟 Binance 主流幣服務..."
+        echo "↺  重啟 Binance OI 背離做多服務..."
         echo "── 停止 ──────────────────────"
         do_stop
         echo "── 等待程序退出（12s）────────"
@@ -137,15 +103,10 @@ case "$CMD" in
         ;;
 
     log)
-        LOG_FILES=()
-        for name in "${NAMES[@]}"; do
-            lf=$(log_file "$name")
-            touch "$lf"
-            LOG_FILES+=("$lf")
-        done
+        touch "$LOG_FILE"
         echo "📋 即時 Log（Ctrl-C 離開）"
         echo "─────────────────────────────"
-        tail -f "${LOG_FILES[@]}"
+        tail -f "$LOG_FILE"
         ;;
 
     status)
@@ -157,11 +118,11 @@ case "$CMD" in
     *)
         echo "用法: $0 {start|stop|restart|log|status}"
         echo ""
-        echo "  start   — 啟動所有幣種（已在運行者自動略過）"
-        echo "  stop    — 停止所有幣種"
+        echo "  start   — 啟動服務（已在運行則略過）"
+        echo "  stop    — 停止服務"
         echo "  restart — 停止後重新啟動（等待 12s 確保程序退出）"
-        echo "  log     — 即時查看所有 log（Ctrl-C 離開）"
-        echo "  status  — 顯示各幣種運行狀態"
+        echo "  log     — 即時查看 log（Ctrl-C 離開）"
+        echo "  status  — 顯示運行狀態"
         exit 1
         ;;
 esac

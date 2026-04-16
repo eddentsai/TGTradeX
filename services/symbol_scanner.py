@@ -76,6 +76,8 @@ class SymbolScanner:
                             超過此值表示近期出現異常行情，K 線形態已失真，排除
         trade_exchange:     實際下單用的交易所；若與 exchange 不同，
                             掃描結果會過濾為兩邊都有上市的交集
+        sort_by:            排序方式："volume"（24h 成交量，預設）或
+                            "volatility"（24h 高低價振幅 %，適合尋找波動最大的幣種）
     """
 
     def __init__(
@@ -87,6 +89,7 @@ class SymbolScanner:
         max_change_pct: float = 40.0,
         trade_exchange: BaseExchange | None = None,
         volatile_cooldown_hours: float = 24.0,
+        sort_by: str = "volume",
     ) -> None:
         self._exchange = exchange
         self._min_quote_vol = min_quote_vol
@@ -94,6 +97,7 @@ class SymbolScanner:
         self._exclude_mainstream = exclude_mainstream
         self._max_change_pct = max_change_pct
         self._volatile_cooldown_secs = volatile_cooldown_hours * 3600
+        self._sort_by = sort_by
         # symbol → 最後一次被異常行情排除的時間戳
         self._volatile_banned: dict[str, float] = {}
         # 只有在掃描交易所與下單交易所不同時才需要取交集
@@ -175,7 +179,11 @@ class SymbolScanner:
                         continue
                     else:
                         del self._volatile_banned[sym]
-            candidates.append((sym, vol))
+            last_price = t.get("last_price", 0) or 0
+            high       = t.get("high", 0) or 0
+            low        = t.get("low", 0) or 0
+            volatility = (high - low) / last_price * 100 if last_price > 0 else 0.0
+            candidates.append((sym, vol, volatility))
 
         if skipped_no_market:
             logger.info(
@@ -197,23 +205,28 @@ class SymbolScanner:
                 + ", ".join(skipped_cooldown)
             )
 
-        # 按成交量降序
-        candidates.sort(key=lambda x: x[1], reverse=True)
+        # 依 sort_by 排序
+        if self._sort_by == "volatility":
+            candidates.sort(key=lambda x: x[2], reverse=True)  # x[2] = volatility %
+            sort_label = "振幅%"
+        else:
+            candidates.sort(key=lambda x: x[1], reverse=True)  # x[1] = quote_vol
+            sort_label = "成交量"
 
         if self._top_n > 0:
             # 先保留已持倉幣種，再從排名前 top_n 補齊
-            top_symbols = [s for s, _ in candidates[: self._top_n]]
+            top_symbols = [c[0] for c in candidates[: self._top_n]]
             for sym in held:
                 if sym not in top_symbols:
                     top_symbols.append(sym)
             result = top_symbols
         else:
-            result = [s for s, _ in candidates]
+            result = [c[0] for c in candidates]
 
         logger.info(
             f"[Scanner] 掃描完成: 共 {len(tickers)} 個合約，"
             f"符合條件 {len(result)} 個"
-            f"（最低成交量門檻 {self._min_quote_vol:,.0f} USDT"
+            f"（排序={sort_label}，最低成交量門檻 {self._min_quote_vol:,.0f} USDT"
             + ("，已排除主流幣" if self._exclude_mainstream else "")
             + "）"
         )
