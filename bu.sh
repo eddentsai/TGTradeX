@@ -18,7 +18,7 @@ LOG_FILE="$LOG_DIR/${NAME}.log"
 PID_FILE="$LOG_DIR/${NAME}.pid"
 
 SERVICE_ARGS="--exchange bitunix --max-positions 3 \
-    --leverage 2 --risk-pct 1.0 --interval 1h --scan-interval 3600"
+    --leverage 4 --risk-pct 1.0 --interval 5m --scan-interval 3600"
 
 # ── 工具函式 ───────────────────────────────────────────────────────────────────
 

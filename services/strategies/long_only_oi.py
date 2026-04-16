@@ -24,14 +24,16 @@ from services.strategies.base import ActivePosition, BaseStrategy, Signal
 logger = logging.getLogger(__name__)
 
 # ── 可調整參數 ─────────────────────────────────────────────────────────────────
-_SL_PCT           = 0.20  # 硬止損：進場價 -20%
-_OI_EXIT_PCT      = 0.05  # OI 從峰值下跌 5% 視為資金撤退
-_LS_SHIFT_PCT     = 0.10  # 多空比較進場上升 10% 視為空方增加
-_LS_ENTRY_DROP    = 3.0   # 進場確認：多空比需下降至少 3%（空方在累積）
-_NO_TP_MULT       = 5.0   # 「無 TP」佔位值：進場價 × 5，實際由 OI/LS 出場
-_PERIOD           = "1h"
-_LS_ENTRY_LIMIT   = 5     # 進場時取最近 5 期多空比判斷趨勢
-_LS_LIMIT         = 3     # 出場監控時取最新 3 筆
+_SL_PCT              = 0.20  # 硬止損：進場價 -20%
+_OI_EXIT_PCT         = 0.05  # OI 從峰值下跌 5% 視為資金撤退
+_LS_SHIFT_PCT        = 0.10  # 多空比較進場上升 10% 視為空方增加
+_LS_ENTRY_DROP       = 3.0   # 進場確認：多空比需下降至少 3%（空方在累積）
+_NO_TP_MULT          = 5.0   # 「無 TP」佔位值：進場價 × 5，實際由 OI/LS 出場
+_PERIOD              = "1h"
+_LS_ENTRY_LIMIT      = 5     # 進場時取最近 5 期多空比判斷趨勢
+_LS_LIMIT            = 3     # 出場監控時取最新 3 筆
+_TRAIL_ACTIVATE_PCT  = 0.15  # 移動止損啟動：進場後上漲 15% 才開始追蹤
+_TRAIL_DISTANCE_PCT  = 0.08  # 移動止損距離：SL 設在當前價格下方 8%
 
 _PERIOD_MAP = {
     "1m": "5m", "3m": "5m", "5m": "5m",
@@ -44,25 +46,31 @@ _PERIOD_MAP = {
 class LongOnlyOiStrategy(BaseStrategy):
     """
     Args:
-        sl_pct:        硬止損比例（預設 0.20 = -20%）
-        oi_exit_pct:   OI 從峰值下跌此比例時出場（預設 0.05 = 5%）
-        ls_shift_pct:  多空比較進場上升此比例時出場（預設 0.10 = 10%）
-        period:        Binance OI/LS API 週期（自動對齊至支援粒度）
-        data_provider: 外部注入（測試用），預設自動建立
+        sl_pct:               硬止損比例（預設 0.20 = -20%）
+        oi_exit_pct:          OI 從峰值下跌此比例時出場（預設 0.05 = 5%）
+        ls_shift_pct:         多空比較進場上升此比例時出場（預設 0.10 = 10%）
+        trail_activate_pct:   移動止損啟動門檻：進場後上漲此比例才開始追蹤（預設 0.15 = +15%）
+        trail_distance_pct:   移動止損距離：SL 距當前價格下方此比例（預設 0.08 = 8%）
+        period:               Binance OI/LS API 週期（自動對齊至支援粒度）
+        data_provider:        外部注入（測試用），預設自動建立
     """
 
     def __init__(
         self,
-        sl_pct:        float = _SL_PCT,
-        oi_exit_pct:   float = _OI_EXIT_PCT,
-        ls_shift_pct:  float = _LS_SHIFT_PCT,
-        period:        str   = _PERIOD,
-        data_provider: BinanceFuturesData | None = None,
+        sl_pct:              float = _SL_PCT,
+        oi_exit_pct:         float = _OI_EXIT_PCT,
+        ls_shift_pct:        float = _LS_SHIFT_PCT,
+        trail_activate_pct:  float = _TRAIL_ACTIVATE_PCT,
+        trail_distance_pct:  float = _TRAIL_DISTANCE_PCT,
+        period:              str   = _PERIOD,
+        data_provider:       BinanceFuturesData | None = None,
     ) -> None:
-        self._sl_pct       = sl_pct
-        self._oi_exit_pct  = oi_exit_pct
-        self._ls_shift_pct = ls_shift_pct
-        self._period       = _PERIOD_MAP.get(period, "1h")
+        self._sl_pct             = sl_pct
+        self._oi_exit_pct        = oi_exit_pct
+        self._ls_shift_pct       = ls_shift_pct
+        self._trail_activate_pct = trail_activate_pct
+        self._trail_distance_pct = trail_distance_pct
+        self._period             = _PERIOD_MAP.get(period, "1h")
         self._data         = data_provider or BinanceFuturesData()
         # 每個幣種的進場狀態追蹤（symbol → value）
         self._entry_oi: dict[str, float] = {}
@@ -195,6 +203,22 @@ class LongOnlyOiStrategy(BaseStrategy):
                         ),
                     )
 
+        # ── 移動止損：進場漲幅超過啟動門檻後，每根 K 線更新交易所 SL ──────────
+        gain = (close - pos.entry_price) / pos.entry_price
+        if gain >= self._trail_activate_pct:
+            new_sl = round(close * (1 - self._trail_distance_pct), 8)
+            # 棘輪機制：只往上移，不往下調
+            if new_sl > pos.stop_loss:
+                return Signal(
+                    action="trail_sl",
+                    stop_loss=new_sl,
+                    reason=(
+                        f"移動止損上移 SL {pos.stop_loss:.4f} → {new_sl:.4f}"
+                        f"（距現價 -{self._trail_distance_pct*100:.0f}%，"
+                        f"進場 +{gain*100:.1f}%）"
+                    ),
+                )
+
         oi_info = (
             f"OI峰={self._peak_oi[symbol]:.0f}"
             if symbol in self._peak_oi else "OI追蹤中"
@@ -203,9 +227,13 @@ class LongOnlyOiStrategy(BaseStrategy):
             f"LS進場={self._entry_ls[symbol]:.3f} 現={ls_hist[-1]['longShortRatio']:.3f}"
             if ls_hist and symbol in self._entry_ls else ""
         )
+        trail_info = (
+            f" trail={'啟動' if gain >= self._trail_activate_pct else f'待啟動(需+{self._trail_activate_pct*100:.0f}%)'}"
+            f"(+{gain*100:.1f}%)"
+        )
         return Signal(
             action="hold",
-            reason=f"持倉中 price={close:.4f} {oi_info} {ls_info}".strip(),
+            reason=f"持倉中 price={close:.4f} {oi_info} {ls_info}{trail_info}".strip(),
         )
 
     def _clear_state(self, symbol: str) -> None:

@@ -126,7 +126,7 @@ def main() -> None:
     parser.add_argument(
         "--interval",
         default="1h",
-        choices=["15m", "30m", "1h", "2h", "4h"],
+        choices=["5m", "15m", "30m", "1h", "2h", "4h"],
         help="K 線週期（預設 1h）",
     )
     parser.add_argument(
@@ -158,6 +158,18 @@ def main() -> None:
         type=float,
         default=10.0,
         help="多空比較進場上升此比例時出場 %（預設 10.0）",
+    )
+    parser.add_argument(
+        "--trail-activate",
+        type=float,
+        default=15.0,
+        help="移動止損啟動門檻 %%（進場後上漲此比例才開始追蹤，預設 15.0）",
+    )
+    parser.add_argument(
+        "--trail-distance",
+        type=float,
+        default=8.0,
+        help="移動止損距離 %%（SL 設在當前價格下方此比例，預設 8.0）",
     )
     parser.add_argument(
         "--dry-run",
@@ -205,6 +217,8 @@ def main() -> None:
         f"  sl_pct          = -{args.sl_pct}%\n"
         f"  oi_exit_pct     = -{args.oi_exit_pct}%（OI 從峰值）\n"
         f"  ls_shift_pct    = +{args.ls_shift_pct}%（多空比較進場）\n"
+        f"  trail_activate  = +{args.trail_activate}%（移動止損啟動門檻）\n"
+        f"  trail_distance  = -{args.trail_distance}%（移動止損距離）\n"
         f"  dry_run         = {args.dry_run}"
     )
 
@@ -244,6 +258,8 @@ def main() -> None:
         sl_pct=args.sl_pct / 100,
         oi_exit_pct=args.oi_exit_pct / 100,
         ls_shift_pct=args.ls_shift_pct / 100,
+        trail_activate_pct=args.trail_activate / 100,
+        trail_distance_pct=args.trail_distance / 100,
         period=args.interval,
     )
 
