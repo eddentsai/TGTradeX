@@ -22,6 +22,7 @@ from services.notifier import TelegramNotifier
 from services.position_sizer import PositionSizer
 from services.risk_guard import RiskGuard
 from services.runner import ServiceRunner
+from services.trade_journal import TradeJournal
 from services.strategies.ensemble import EnsembleStrategy
 from services.symbol_scanner import SymbolScanner
 
@@ -67,6 +68,7 @@ class RunnerManager:
         redis_url: str | None = "redis://localhost:6379/0",
         notifier: TelegramNotifier | None = None,
         risk_guard: RiskGuard | None = None,
+        trade_journal: TradeJournal | None = None,
     ) -> None:
         self._exchange = exchange
         self._scanner = scanner
@@ -88,6 +90,7 @@ class RunnerManager:
 
         self._notifier = notifier
         self._risk_guard = risk_guard
+        self._trade_journal = trade_journal
 
         # 黑名單：從 Redis 載入（若可用），否則只用記憶體
         self._redis = self._connect_redis(redis_url)
@@ -241,6 +244,7 @@ class RunnerManager:
             strategy=strategy,
             notifier=self._notifier,
             risk_guard=self._risk_guard,
+            trade_journal=self._trade_journal,
         )
         thread = threading.Thread(
             target=runner.run,

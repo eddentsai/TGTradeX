@@ -36,6 +36,7 @@ from services.notifier import TelegramNotifier
 from services.position_sizer import PositionSizer
 from services.risk_guard import RiskGuard
 from services.runner_manager import RunnerManager
+from services.trade_journal import TradeJournal
 from services.strategies.dip_volume import DipVolumeStrategy
 from services.strategies.fibonacci import FibonacciStrategy
 from services.strategies.oi_ls_ratio import OiLsRatioStrategy
@@ -283,6 +284,9 @@ def main() -> None:
         qty_precision=3,  # 佔位符，RunnerManager 內部會覆寫
     )
 
+    # ── 建立交易日誌 ──────────────────────────────────────────────────────────
+    journal = TradeJournal(path=f"logs/trade_journal_{args.exchange}.csv")
+
     # ── 建立 RunnerManager（Ensemble 模式）────────────────────────────────────
     manager = RunnerManager(
         exchange=exchange,
@@ -298,6 +302,7 @@ def main() -> None:
         redis_url=args.redis_url or None,
         notifier=notifier,
         risk_guard=risk_guard,
+        trade_journal=journal,
     )
 
     # ── 處理 Ctrl-C / SIGTERM ─────────────────────────────────────────────────

@@ -20,6 +20,7 @@ from services.position_store import load as pos_load
 from services.position_store import save as pos_save
 from services.notifier import TelegramNotifier
 from services.risk_guard import RiskGuard
+from services.trade_journal import TradeJournal
 from services.strategies.base import ActivePosition, BaseStrategy, Signal
 from services.strategies.dip_volume import DipVolumeStrategy
 from services.strategies.fibonacci import FibonacciStrategy
@@ -145,6 +146,7 @@ class ServiceRunner:
         strategy: BaseStrategy | None = None,
         notifier: TelegramNotifier | None = None,
         risk_guard: RiskGuard | None = None,
+        trade_journal: TradeJournal | None = None,
     ) -> None:
         if sizer is None and fixed_qty is None:
             raise ValueError("必須提供 sizer 或 fixed_qty 其中之一")
@@ -160,6 +162,7 @@ class ServiceRunner:
         self._fixed_strategy = strategy  # 外部注入時固定使用；None = 自動切換
         self._notifier = notifier
         self._risk_guard = risk_guard
+        self._trade_journal = trade_journal
         self._interval_sec = _INTERVAL_SECONDS.get(interval, 900)
 
         # 資金費率快取（避免每根 K 線都呼叫 API）
@@ -399,6 +402,17 @@ class ServiceRunner:
         if pos_dict is None:
             if self._active_pos is not None:
                 logger.info(f"[{self._symbol}] 交易所無倉位，清除本地狀態")
+                if self._trade_journal is not None:
+                    self._trade_journal.record_close(
+                        symbol=self._symbol,
+                        exchange=self._exchange.name,
+                        side=self._active_pos.side,
+                        strategy=self._active_pos.strategy_name,
+                        interval=self._interval,
+                        entry_price=self._active_pos.entry_price,
+                        qty=self._active_pos.qty,
+                        exit_reason="SL/TP 交易所觸發",
+                    )
                 self._active_pos = None
                 pos_delete(self._exchange.name, self._symbol)
             elif pos_load(self._exchange.name, self._symbol) is not None:
@@ -667,6 +681,17 @@ class ServiceRunner:
             f"SL={sl:.4f} TP={tp:.4f} qty={qty}"
         )
 
+        if self._trade_journal is not None:
+            self._trade_journal.record_open(
+                symbol=self._symbol,
+                exchange=self._exchange.name,
+                side=side,
+                strategy=strategy_name,
+                interval=self._interval,
+                entry_price=entry,
+                qty=qty,
+            )
+
         if self._notifier is not None:
             self._notifier.notify_open(
                 symbol=self._symbol,
@@ -789,6 +814,18 @@ class ServiceRunner:
             if side != "BUY":
                 pnl_pct = -pnl_pct
             self._risk_guard.record_trade(pnl_pct)
+
+        if self._trade_journal is not None:
+            self._trade_journal.record_close(
+                symbol=self._symbol,
+                exchange=self._exchange.name,
+                side=side,
+                strategy=active_pos.strategy_name,
+                interval=self._interval,
+                entry_price=entry,
+                qty=active_pos.qty,
+                exit_reason=signal.reason,
+            )
 
         self._active_pos = None
         pos_delete(self._exchange.name, self._symbol)

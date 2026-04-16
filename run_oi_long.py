@@ -44,6 +44,7 @@ from services.risk_guard import RiskGuard
 from services.runner_manager import RunnerManager
 from services.strategies.long_only_oi import LongOnlyOiStrategy
 from services.symbol_scanner import SymbolScanner
+from services.trade_journal import TradeJournal
 
 logging.basicConfig(
     level=logging.INFO,
@@ -252,6 +253,9 @@ def main() -> None:
         qty_precision=3,
     )
 
+    # ── 建立交易日誌 ──────────────────────────────────────────────────────────
+    journal = TradeJournal(path=f"logs/trade_journal_{args.exchange}.csv")
+
     # ── 建立 RunnerManager（單策略模式）──────────────────────────────────────
     manager = RunnerManager(
         exchange=trade_exchange,
@@ -267,6 +271,7 @@ def main() -> None:
         redis_url=args.redis_url or None,
         notifier=notifier,
         risk_guard=risk_guard,
+        trade_journal=journal,
     )
 
     # ── 處理 Ctrl-C / SIGTERM ─────────────────────────────────────────────────
