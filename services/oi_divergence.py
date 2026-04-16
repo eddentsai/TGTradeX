@@ -9,6 +9,7 @@ OI 48 小時背離篩選器
   - 價格 48h 變化 < ±3%（市場尚未反應）
   - 最近 3 根 K 線合計成交額 > 300 萬 USDT（排除殭屍幣）
 """
+
 from __future__ import annotations
 
 import logging
@@ -19,10 +20,10 @@ from services.external_data.binance_futures import BinanceFuturesData
 
 logger = logging.getLogger(__name__)
 
-_OI_CHANGE_MIN    = 0.15  # OI 48h 增加最少 15%
-_PRICE_CHANGE_MAX = 0.03  # 價格 48h 變化絕對值最多 3%
-_MIN_RECENT_VOL   = 3_000_000  # 最近 3 根 K 線合計成交額最少 300 萬 USDT（過濾殭屍幣）
-_API_DELAY        = 0.2   # 每筆 symbol 間的延遲（秒），避免觸發速率限制
+_OI_CHANGE_MIN = 0.12  # OI 48h 增加最少 12%
+_PRICE_CHANGE_MAX = 0.05  # 價格 48h 變化絕對值最多 5%
+_MIN_RECENT_VOL = 3_000_000  # 最近 3 根 K 線合計成交額最少 300 萬 USDT（過濾殭屍幣）
+_API_DELAY = 0.2  # 每筆 symbol 間的延遲（秒），避免觸發速率限制
 
 
 class OiDivergenceFilter:
@@ -32,36 +33,36 @@ class OiDivergenceFilter:
     Args:
         binance_data:     BinanceFuturesData 實例（提供 OI 歷史）
         exchange:         用於取得 K 線的交易所（建議用 Binance 公開端點）
-        oi_change_min:    OI 48h 最低上升比例（預設 0.15 = 15%）
+        oi_change_min:    OI 48h 最低上升比例（預設 0.12 = 12%）
         price_change_max: 價格 48h 最高變動絕對值（預設 0.03 = 3%）
         min_recent_vol:   最近 3 根 K 線合計 USDT 成交額門檻（預設 300 萬）
     """
 
     def __init__(
         self,
-        binance_data:      BinanceFuturesData,
-        exchange:          BaseExchange,
-        oi_change_min:     float = _OI_CHANGE_MIN,
-        price_change_max:  float = _PRICE_CHANGE_MAX,
-        min_recent_vol:    float = _MIN_RECENT_VOL,
+        binance_data: BinanceFuturesData,
+        exchange: BaseExchange,
+        oi_change_min: float = _OI_CHANGE_MIN,
+        price_change_max: float = _PRICE_CHANGE_MAX,
+        min_recent_vol: float = _MIN_RECENT_VOL,
     ) -> None:
-        self._data          = binance_data
-        self._exchange      = exchange
-        self._oi_min        = oi_change_min
-        self._price_max     = price_change_max
+        self._data = binance_data
+        self._exchange = exchange
+        self._oi_min = oi_change_min
+        self._price_max = price_change_max
         self._min_recent_vol = min_recent_vol
 
     def filter(
         self,
-        symbols:      list[str],
+        symbols: list[str],
         held_symbols: set[str] | None = None,
     ) -> list[str]:
         """
         回傳符合 OI 背離條件的幣種列表。
         已持倉幣種無條件保留，不受篩選影響。
         """
-        held    = held_symbols or set()
-        result  = []
+        held = held_symbols or set()
+        result = []
         skipped = []
 
         for sym in symbols:
@@ -126,9 +127,6 @@ class OiDivergenceFilter:
         price_change = (price_new - price_old) / price_old
 
         # 最近 3 根的合計 USDT 成交額（volume 是幣本位，乘以收盤價換算）
-        recent_vol = sum(
-            float(k["volume"]) * float(k["close"])
-            for k in klines[-3:]
-        )
+        recent_vol = sum(float(k["volume"]) * float(k["close"]) for k in klines[-3:])
 
         return oi_change, price_change, recent_vol
