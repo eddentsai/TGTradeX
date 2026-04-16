@@ -246,11 +246,15 @@ required_margin = position_value ÷ leverage
 | `ConservativeStrategy` | DOWNTREND | 不入場 | 有倉位則平倉 |
 | `EnsembleStrategy` | 可選模式 | ≥ 2 個策略同時確認開倉；SL 取最高，TP 取最低（最保守）| 任一策略觸發出場即出場 |
 | `OiLsRatioStrategy` | 獨立運行 | OI 上升 ≥ 1.5% + 多空比朝擠壓方向變動 ≥ 3% + 單調性 ≥ 60% + RSI 過濾 + 24h 漲跌幅過濾 | SL/TP/移動止損；SL 後 2h 冷卻 |
-| `LongOnlyOiStrategy` | 獨立運行 | OI 背離預篩後：收盤 > EMA20 + RSI < 70 | 硬止損 -20%；OI 從峰值跌 >5%；多空比較進場漲 >10%；無固定 TP |
+| `LongOnlyOiStrategy` | 獨立運行 | OI 背離預篩後：多空比近 5 期下降 >3%（空方累積）+ 收盤 > EMA20 + RSI < 70 | 硬止損 -20%；OI 從峰值跌 >5%；多空比較進場漲 >10%；無固定 TP |
 
 `OiLsRatioStrategy`：Binance 公開 API 抓 OI + 多空比，雙向交易，用於 `run_mix_strategies.py`。
 
-`LongOnlyOiStrategy`：僅做多，依賴 `OiDivergenceFilter` 預篩選（OI 48h > +20%、價格 < ±3%），出場由 OI/多空比結構決定而非固定 TP，用於 `run_oi_long.py`（bn.sh / bu.sh）。
+`LongOnlyOiStrategy`：僅做多，完整進場條件分兩層：
+- 掃描層（`OiDivergenceFilter`）：OI 48h > +20%、價格 48h < ±3%
+- 策略層（`_check_entry`）：多空比近 5 期下降 > 3%（空方在累積）+ 收盤 > EMA20 + RSI < 70
+
+出場由 OI/多空比結構決定（OI 從峰值跌 >5% 或多空比較進場漲 >10%），不設固定 TP。用於 `run_oi_long.py`（bn.sh / bu.sh）。
 
 `ServiceRunner` 透過 `strategy` 參數接受外部注入的策略實例（例如 `EnsembleStrategy`）；`strategy=None` 時根據市場狀態自動切換。`RunnerManager` 的 `_build_strategy()` 負責根據 `enable_ensemble` 決定傳入哪種策略。
 

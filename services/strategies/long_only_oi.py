@@ -24,12 +24,14 @@ from services.strategies.base import ActivePosition, BaseStrategy, Signal
 logger = logging.getLogger(__name__)
 
 # ── 可調整參數 ─────────────────────────────────────────────────────────────────
-_SL_PCT       = 0.20  # 硬止損：進場價 -20%
-_OI_EXIT_PCT  = 0.05  # OI 從峰值下跌 5% 視為資金撤退
-_LS_SHIFT_PCT = 0.10  # 多空比較進場上升 10% 視為空方增加
-_NO_TP_MULT   = 5.0   # 「無 TP」佔位值：進場價 × 5，實際由 OI/LS 出場
-_PERIOD       = "1h"
-_LS_LIMIT     = 3     # 每次取最新 3 筆確認方向
+_SL_PCT           = 0.20  # 硬止損：進場價 -20%
+_OI_EXIT_PCT      = 0.05  # OI 從峰值下跌 5% 視為資金撤退
+_LS_SHIFT_PCT     = 0.10  # 多空比較進場上升 10% 視為空方增加
+_LS_ENTRY_DROP    = 3.0   # 進場確認：多空比需下降至少 3%（空方在累積）
+_NO_TP_MULT       = 5.0   # 「無 TP」佔位值：進場價 × 5，實際由 OI/LS 出場
+_PERIOD           = "1h"
+_LS_ENTRY_LIMIT   = 5     # 進場時取最近 5 期多空比判斷趨勢
+_LS_LIMIT         = 3     # 出場監控時取最新 3 筆
 
 _PERIOD_MAP = {
     "1m": "5m", "3m": "5m", "5m": "5m",
@@ -104,6 +106,24 @@ class LongOnlyOiStrategy(BaseStrategy):
                 reason=f"RSI {snap.rsi:.1f} 超買（≥70），等待回落",
             )
 
+        # 多空比確認：空方持續累積（longShortRatio 下降 = 空方比例增加）
+        ls_hist = self._data.get_ls_ratio_history(symbol, self._period, limit=_LS_ENTRY_LIMIT)
+        if ls_hist is None:
+            return Signal(action="hold", reason=f"多空比數據不可用（{symbol} 不支援）")
+        if len(ls_hist) < 2:
+            return Signal(action="hold", reason="多空比數據不足")
+
+        ls_values = [r["longShortRatio"] for r in ls_hist]  # 由舊到新
+        ls_change = (ls_values[-1] - ls_values[0]) / ls_values[0] * 100
+        if ls_change > -_LS_ENTRY_DROP:
+            return Signal(
+                action="hold",
+                reason=(
+                    f"多空比未持續下降 LS={ls_values[-1]:.3f}（變化 {ls_change:+.1f}%，"
+                    f"需 <-{_LS_ENTRY_DROP:.0f}%），空方尚未累積"
+                ),
+            )
+
         close = snap.close
         sl    = round(close * (1 - self._sl_pct), 8)
         tp    = round(close * _NO_TP_MULT, 8)  # 500% 佔位，實際由 OI/LS 結構決定出場
@@ -112,8 +132,9 @@ class LongOnlyOiStrategy(BaseStrategy):
             stop_loss=sl,
             take_profit=tp,
             reason=(
-                f"OI 背離進場: EMA20={snap.ema20:.4f}"
+                f"軋空佈局: EMA20={snap.ema20:.4f}"
                 + (f" RSI={snap.rsi:.1f}" if snap.rsi is not None else "")
+                + f" LS={ls_values[-1]:.3f}({ls_change:+.1f}%)"
                 + f" SL={sl:.4f}（-{self._sl_pct*100:.0f}%）TP=結構出場"
             ),
         )
