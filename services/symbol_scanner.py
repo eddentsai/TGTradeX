@@ -72,7 +72,7 @@ class SymbolScanner:
         min_quote_vol:      24h 最低 USDT 成交量門檻（以 exchange 的數據為準）
         top_n:              最多回傳幾個候選幣種（0 = 不限）
         exclude_mainstream: 是否排除主流幣（預設 True）
-        max_change_pct:     24h 漲跌幅絕對值上限（預設 40%）；
+        max_change_pct:     24h 漲跌幅絕對值上限（預設 90%）；
                             超過此值表示近期出現異常行情，K 線形態已失真，排除
         trade_exchange:     實際下單用的交易所；若與 exchange 不同，
                             掃描結果會過濾為兩邊都有上市的交集
@@ -86,7 +86,7 @@ class SymbolScanner:
         min_quote_vol: float = 100_000_000,
         top_n: int = 0,
         exclude_mainstream: bool = True,
-        max_change_pct: float = 40.0,
+        max_change_pct: float = 90.0,
         trade_exchange: BaseExchange | None = None,
         volatile_cooldown_hours: float = 24.0,
         sort_by: str = "volume",
@@ -180,8 +180,8 @@ class SymbolScanner:
                     else:
                         del self._volatile_banned[sym]
             last_price = t.get("last_price", 0) or 0
-            high       = t.get("high", 0) or 0
-            low        = t.get("low", 0) or 0
+            high = t.get("high", 0) or 0
+            low = t.get("low", 0) or 0
             volatility = (high - low) / last_price * 100 if last_price > 0 else 0.0
             candidates.append((sym, vol, volatility))
 
