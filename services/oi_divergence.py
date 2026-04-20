@@ -7,7 +7,7 @@ OI 48 小時背離篩選器
 篩選參數（預設）：
   - OI 48h 增加 > 15%（持倉持續累積）
   - 價格 48h 變化 < ±3%（市場尚未反應）
-  - 最近 3 根 K 線合計成交額 > 300 萬 USDT（排除殭屍幣）
+  - 最近 3 根 K 線合計成交額 > 200 萬 USDT（排除殭屍幣）
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 _OI_CHANGE_MIN = 0.12  # OI 48h 增加最少 12%
 _PRICE_CHANGE_MAX = 0.05  # 價格 48h 變化絕對值最多 5%
-_MIN_RECENT_VOL = 3_000_000  # 最近 3 根 K 線合計成交額最少 300 萬 USDT（過濾殭屍幣）
+_MIN_RECENT_VOL = 2_000_000  # 最近 3 根 K 線合計成交額最少 200 萬 USDT（過濾殭屍幣）
 _API_DELAY = 0.2  # 每筆 symbol 間的延遲（秒），避免觸發速率限制
 
 
@@ -35,7 +35,7 @@ class OiDivergenceFilter:
         exchange:         用於取得 K 線的交易所（建議用 Binance 公開端點）
         oi_change_min:    OI 48h 最低上升比例（預設 0.12 = 12%）
         price_change_max: 價格 48h 最高變動絕對值（預設 0.03 = 3%）
-        min_recent_vol:   最近 3 根 K 線合計 USDT 成交額門檻（預設 300 萬）
+        min_recent_vol:   最近 3 根 K 線合計 USDT 成交額門檻（預設 200 萬）
     """
 
     def __init__(
