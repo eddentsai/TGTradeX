@@ -18,7 +18,7 @@ LOG_FILE="$LOG_DIR/${NAME}.log"
 PID_FILE="$LOG_DIR/${NAME}.pid"
 
 SERVICE_ARGS="--exchange binance --max-positions 3 \
-    --leverage 4 --risk-pct 1.0 --sl-pct 11 --interval 5m --scan-interval 900 --min-volume 20000000 --top-volatile 100"
+    --leverage 4 --risk-pct 1.0 --sl-pct 11 --interval 15m --scan-interval 900 --min-volume 20000000 --top-volatile 100"
 
 # ── 工具函式 ───────────────────────────────────────────────────────────────────
 
