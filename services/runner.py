@@ -312,13 +312,14 @@ class ServiceRunner:
         # 外部注入（例如 EnsembleStrategy）優先；否則根據市場狀態自動選
         strategy = self._fixed_strategy or self._strategies[state]
 
-        # 策略切換保護：只在自動切換模式下有意義
-        had_position = active_pos is not None
-        active_pos = self._handle_strategy_switch(snap, active_pos, strategy.name)
-        just_closed = had_position and active_pos is None and self._active_pos is None
-        if just_closed:
-            # 剛被策略切換平倉，本週期不再嘗試開新倉
-            return
+        # 策略切換保護：只在自動切換模式（_fixed_strategy=None）下有意義
+        # 固定策略（Ensemble）模式下跳過，避免多服務共用帳戶時互相平倉
+        if self._fixed_strategy is None:
+            had_position = active_pos is not None
+            active_pos = self._handle_strategy_switch(snap, active_pos, strategy.name)
+            just_closed = had_position and active_pos is None and self._active_pos is None
+            if just_closed:
+                return
 
         # 6. 產生信號
         signal = strategy.on_candle(snap, active_pos)
