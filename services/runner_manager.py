@@ -23,6 +23,7 @@ from services.position_sizer import PositionSizer
 from services.risk_guard import RiskGuard
 from services.runner import ServiceRunner
 from services.trade_journal import TradeJournal
+from services.position_store import cleanup_stale as pos_cleanup_stale
 from services.strategies.ensemble import EnsembleStrategy
 from services.symbol_scanner import SymbolScanner
 
@@ -188,6 +189,7 @@ class RunnerManager:
           - 查不到合約規格的幣種加入黑名單，下次掃描自動排除
         """
         held = self._held_symbols()
+        pos_cleanup_stale(self._exchange.name, held)
         targets = self._scanner.scan(held_symbols=held)
         targets = [s for s in targets if s not in self._invalid_symbols]
 

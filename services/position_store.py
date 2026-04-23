@@ -78,3 +78,21 @@ def delete(exchange: str, symbol: str) -> None:
         logger.debug(f"[{exchange}/{symbol}] 倉位狀態已清除")
     except Exception as e:
         logger.warning(f"[{exchange}/{symbol}] 刪除倉位快取失敗: {e}")
+
+
+def cleanup_stale(exchange: str, open_symbols: set[str]) -> None:
+    """
+    服務啟動時呼叫：掃描 storage/positions/ 中屬於此交易所的檔案，
+    刪除交易所上已無對應倉位的殘留 JSON。
+    """
+    if not _STORE_DIR.exists():
+        return
+    prefix = f"{exchange}_"
+    for path in _STORE_DIR.glob(f"{prefix}*.json"):
+        symbol = path.stem[len(prefix):]
+        if symbol not in open_symbols:
+            try:
+                path.unlink()
+                logger.info(f"[{exchange}/{symbol}] 清除殘留倉位快取（交易所已無此倉位）")
+            except Exception as e:
+                logger.warning(f"[{exchange}/{symbol}] 清除殘留快取失敗: {e}")
