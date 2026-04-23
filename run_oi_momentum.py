@@ -103,6 +103,12 @@ def main() -> None:
                         help="RSI 超買門檻（預設 75.0；動能策略建議調高至 80）")
     parser.add_argument("--trail-activate", type=float, default=15.0)
     parser.add_argument("--trail-distance", type=float, default=8.0)
+    parser.add_argument("--tp-pct", type=float, default=50.0,
+                        help="固定止盈：進場漲幅達此值直接出場 %%（預設 50.0）")
+    parser.add_argument("--lock-gain-pct", type=float, default=30.0,
+                        help="鎖定觸發門檻：進場漲幅達此值後上移 SL %%（預設 30.0）")
+    parser.add_argument("--lock-sl-pct", type=float, default=10.0,
+                        help="鎖定止損位置：entry × (1 + 此值) %%（預設 10.0）")
     parser.add_argument("--max-consecutive-losses", type=int, default=3)
     parser.add_argument("--max-daily-loss", type=float, default=10.0)
     parser.add_argument("--dry-run", action="store_true")
@@ -171,6 +177,9 @@ def main() -> None:
         trail_distance_pct=args.trail_distance / 100,
         vol_surge_ratio=args.vol_surge_ratio,
         rsi_max=args.rsi_max,
+        tp_pct=args.tp_pct / 100,
+        lock_gain_pct=args.lock_gain_pct / 100,
+        lock_sl_pct=args.lock_sl_pct / 100,
         period=args.interval,
     )
 

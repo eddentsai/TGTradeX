@@ -35,6 +35,9 @@ _TRAIL_ACTIVATE_PCT = 0.15
 _TRAIL_DISTANCE_PCT = 0.08
 _VOL_SURGE_RATIO    = 1.5   # 近 3 根均量需 > 前 10 根均量 × 此倍
 _RSI_MAX            = 75.0
+_TP_PCT             = 0.50  # 固定止盈：進場 +50% 直接出場
+_LOCK_GAIN_PCT      = 0.30  # 進場漲幅達此值後，SL 鎖定至 entry + lock_sl_pct
+_LOCK_SL_PCT        = 0.10  # 鎖定止損位置：entry × (1 + 此值)
 
 _PERIOD_MAP = {
     "1m": "5m", "3m": "5m", "5m": "5m",
@@ -67,6 +70,9 @@ class LongOiMomentumStrategy(BaseStrategy):
         trail_distance_pct: float = _TRAIL_DISTANCE_PCT,
         vol_surge_ratio:    float = _VOL_SURGE_RATIO,
         rsi_max:            float = _RSI_MAX,
+        tp_pct:             float = _TP_PCT,
+        lock_gain_pct:      float = _LOCK_GAIN_PCT,
+        lock_sl_pct:        float = _LOCK_SL_PCT,
         period:             str   = _PERIOD,
         data_provider:      BinanceFuturesData | None = None,
     ) -> None:
@@ -77,6 +83,9 @@ class LongOiMomentumStrategy(BaseStrategy):
         self._trail_distance_pct = trail_distance_pct
         self._vol_surge_ratio    = vol_surge_ratio
         self._rsi_max            = rsi_max
+        self._tp_pct             = tp_pct
+        self._lock_gain_pct      = lock_gain_pct
+        self._lock_sl_pct        = lock_sl_pct
         self._period             = _PERIOD_MAP.get(period, "1h")
         self._data               = data_provider or BinanceFuturesData()
         self._entry_oi:  dict[str, float] = {}
@@ -181,6 +190,27 @@ class LongOiMomentumStrategy(BaseStrategy):
                 action="close",
                 reason=f"硬止損 price={close:.4f} ≤ SL={sl_price:.4f}（-{self._sl_pct*100:.0f}%）",
             )
+
+        # 固定止盈：進場 +tp_pct 直接出場
+        if gain >= self._tp_pct:
+            self._clear_state(symbol)
+            return Signal(
+                action="close",
+                reason=f"達到目標獲利 +{gain*100:.1f}%（≥{self._tp_pct*100:.0f}%），獲利了結",
+            )
+
+        # 進場 +lock_gain_pct 後：SL 至少鎖定至 entry + lock_sl_pct
+        if gain >= self._lock_gain_pct:
+            lock_sl = round(pos.entry_price * (1 + self._lock_sl_pct), 8)
+            if lock_sl > pos.stop_loss:
+                return Signal(
+                    action="trail_sl",
+                    stop_loss=lock_sl,
+                    reason=(
+                        f"進場 +{gain*100:.1f}%（≥{self._lock_gain_pct*100:.0f}%），"
+                        f"SL 鎖定至 entry+{self._lock_sl_pct*100:.0f}%={lock_sl:.4f}"
+                    ),
+                )
 
         # OI 監控：從峰值下跌則出場
         oi_hist = self._data.get_oi_history(symbol, self._period, limit=3)
