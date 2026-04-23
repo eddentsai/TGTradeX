@@ -484,6 +484,20 @@ class ServiceRunner:
                     pos_save(
                         self._exchange.name, self._symbol, self._active_pos
                     )  # 補存 position_id
+                    # 開倉時因無 positionId 未掛 SL/TP，現在補掛
+                    try:
+                        self._exchange.cancel_all_orders(self._symbol)
+                        self._exchange.place_sl_tp_orders(
+                            symbol=self._symbol,
+                            side=self._active_pos.side,
+                            qty=self._active_pos.qty,
+                            sl_price=self._active_pos.stop_loss,
+                            tp_price=self._active_pos.take_profit,
+                            position_id=self._active_pos.position_id,
+                        )
+                        logger.info(f"[{self._symbol}] 補掛 SL/TP 條件單成功（positionId 延遲取得）")
+                    except Exception as e:
+                        logger.error(f"[{self._symbol}] 補掛 SL/TP 失敗，倉位暫無保護: {e}")
 
         return self._active_pos
 
@@ -635,6 +649,24 @@ class ServiceRunner:
         else:
             sl = round(actual_entry * (1 + sl_pct), 8)
             tp = round(actual_entry * (1 - tp_pct), 8)
+
+        # 低價幣精度守衛：確保 SL 四捨五入後仍在 entry 的正確方向
+        if hasattr(self._exchange, "get_price_precision"):
+            price_prec = self._exchange.get_price_precision(self._symbol)
+            tick = 10 ** (-price_prec)
+            if side == "BUY" and round(sl, price_prec) >= actual_entry:
+                sl = round(actual_entry - tick, price_prec)
+                logger.warning(
+                    f"[{self._symbol}] SL 精度修正: 四捨五入後 ≥ entry={actual_entry}，"
+                    f"強制調整為 entry-1tick={sl}"
+                )
+            elif side == "SELL" and round(sl, price_prec) <= actual_entry:
+                sl = round(actual_entry + tick, price_prec)
+                logger.warning(
+                    f"[{self._symbol}] SL 精度修正: 四捨五入後 ≤ entry={actual_entry}，"
+                    f"強制調整為 entry+1tick={sl}"
+                )
+
         if abs(actual_entry - entry) / entry > 0.001:
             logger.info(
                 f"[{self._symbol}] 實際成交價 {actual_entry:.4f}（信號價 {entry:.4f}），"
