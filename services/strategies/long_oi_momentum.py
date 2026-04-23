@@ -180,6 +180,7 @@ class LongOiMomentumStrategy(BaseStrategy):
     def _check_exit(self, snap: IndicatorSnapshot, pos: ActivePosition) -> Signal:
         symbol = snap.symbol
         close  = snap.close
+        gain   = (close - pos.entry_price) / pos.entry_price
 
         # 硬止損
         sl_price = pos.entry_price * (1 - self._sl_pct)
@@ -253,7 +254,6 @@ class LongOiMomentumStrategy(BaseStrategy):
                     )
 
         # 移動止損
-        gain = (close - pos.entry_price) / pos.entry_price
         if gain >= self._trail_activate_pct:
             new_sl = round(close * (1 - self._trail_distance_pct), 8)
             if new_sl > pos.stop_loss:

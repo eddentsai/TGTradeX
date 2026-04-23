@@ -148,8 +148,9 @@ class BinanceExchange(BaseExchange):
                 "side":          "BUY" if amt > 0 else "SELL",
                 "qty":           str(abs(amt)),
                 "unrealizedPnl": str(getattr(p, "un_realized_profit", "") or ""),
-                "openPrice":     str(getattr(p, "entry_price", "") or ""),
-                "positionId":    getattr(p, "symbol", ""),  # Binance 無 positionId，用 symbol 代替
+                "openPrice":      str(getattr(p, "entry_price", "") or ""),
+                "breakEvenPrice": str(getattr(p, "break_even_price", "") or ""),
+                "positionId":     getattr(p, "symbol", ""),  # Binance 無 positionId，用 symbol 代替
                 "_raw": p,
             })
         return result
