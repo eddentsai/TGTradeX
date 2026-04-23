@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 _SL_PCT             = 0.20
 _OI_EXIT_PCT        = 0.05
 _LS_SHIFT_PCT       = 0.10
-_NO_TP_MULT         = 5.0
 _PERIOD             = "1h"
 _LS_LIMIT           = 3
 _TRAIL_ACTIVATE_PCT = 0.15
@@ -136,7 +135,7 @@ class LongOiMomentumStrategy(BaseStrategy):
         # ── 通過，發出開多信號 ────────────────────────────────────────────────
         close = snap.close
         sl    = round(close * (1 - self._sl_pct), 8)
-        tp    = round(close * _NO_TP_MULT, 8)
+        tp    = round(close * (1 + self._tp_pct), 8)
 
         return Signal(
             action="open_long",
