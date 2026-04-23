@@ -99,6 +99,8 @@ def main() -> None:
     parser.add_argument("--ls-shift-pct", type=float, default=10.0)
     parser.add_argument("--vol-surge-ratio", type=float, default=1.5,
                         help="成交量突破倍數（近 3 根均量 > 前 10 根 × 此值，預設 1.5）")
+    parser.add_argument("--rsi-max", type=float, default=75.0,
+                        help="RSI 超買門檻（預設 75.0；動能策略建議調高至 80）")
     parser.add_argument("--trail-activate", type=float, default=15.0)
     parser.add_argument("--trail-distance", type=float, default=8.0)
     parser.add_argument("--max-consecutive-losses", type=int, default=3)
@@ -168,6 +170,7 @@ def main() -> None:
         trail_activate_pct=args.trail_activate / 100,
         trail_distance_pct=args.trail_distance / 100,
         vol_surge_ratio=args.vol_surge_ratio,
+        rsi_max=args.rsi_max,
         period=args.interval,
     )
 
