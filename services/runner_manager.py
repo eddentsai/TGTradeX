@@ -233,6 +233,7 @@ class RunnerManager:
             leverage=self._sizer.leverage,
             risk_pct=self._sizer.risk_pct,
             qty_precision=qty_precision,
+            min_sl_buffer_pct=self._sizer.min_sl_buffer_pct,
         )
         strategy = self._build_strategy()
         runner = ServiceRunner(

@@ -109,6 +109,8 @@ def main() -> None:
                         help="鎖定觸發門檻：進場漲幅達此值後上移 SL %%（預設 30.0）")
     parser.add_argument("--lock-sl-pct", type=float, default=10.0,
                         help="鎖定止損位置：entry × (1 + 此值) %%（預設 10.0）")
+    parser.add_argument("--min-sl-buffer", type=float, default=12.0,
+                        help="SL 距清算價最低緩衝 %%（預設 12.0；小幣 mm_rate 較高故調低）")
     parser.add_argument("--max-consecutive-losses", type=int, default=3)
     parser.add_argument("--max-daily-loss", type=float, default=10.0)
     parser.add_argument("--dry-run", action="store_true")
@@ -187,6 +189,7 @@ def main() -> None:
         leverage=args.leverage,
         risk_pct=args.risk_pct / 100.0,
         qty_precision=3,
+        min_sl_buffer_pct=args.min_sl_buffer / 100.0,
     )
 
     journal = TradeJournal(path=f"logs/trade_journal_momentum_{args.exchange}.csv")
