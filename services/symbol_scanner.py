@@ -31,23 +31,16 @@ _LEVERAGED_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 主流幣黑名單（市值前段班，流動性過高導致 volume profile 特徵不明顯）
+# 排除 BTC（用作市場指標，非交易標的）與 tradFi 掛鉤代幣（不適合動能策略）
+# SOL、ETH、BNB 等主流幣若有 OI 動能突破，OI 過濾器會正常放行
 _MAINSTREAM_SYMBOLS: frozenset[str] = frozenset(
     {
         "BTCUSDT",
-        "ETHUSDT",
-        "SOLUSDT",
-        "ADAUSDT",
-        "BNBUSDT",
-        "XRPUSDT",
-        "LTCUSDT",
-        "DOTUSDT",
-        "UNIUSDT",
-        "XAGUSDT",
-        "XAUUSDT",
-        "XAUTUSDT",
-        "PAXGUSDT",  # 黃金掛鉤代幣，同 XAU 性質
-        "CLUSDT",  # 石油掛鉤代幣
+        "XAGUSDT",   # 白銀
+        "XAUUSDT",   # 黃金
+        "XAUTUSDT",  # 黃金掛鉤代幣
+        "PAXGUSDT",  # 黃金掛鉤代幣
+        "CLUSDT",    # 石油掛鉤代幣
     }
 )
 

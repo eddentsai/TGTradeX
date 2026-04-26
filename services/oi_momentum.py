@@ -63,6 +63,19 @@ class OiMomentumFilter:
         self._max_peak_retrace        = max_peak_retrace
         self._min_recent_vol          = min_recent_vol
 
+    def _btc_is_bullish(self) -> bool:
+        """BTC 收盤站上 EMA20（1h）時回傳 True；取得失敗時放行（True）。"""
+        try:
+            klines = self._exchange.get_klines("BTCUSDT", "1h", limit=25)
+            if not klines or len(klines) < 21:
+                return True
+            closes = [float(k["close"]) for k in klines]
+            ema20 = sum(closes[-20:]) / 20
+            return closes[-1] > ema20
+        except Exception as e:
+            logger.warning(f"[OiMom] BTC EMA20 取得失敗，放行: {e}")
+            return True
+
     def filter(
         self,
         symbols: list[str],
@@ -72,6 +85,11 @@ class OiMomentumFilter:
         held   = held_symbols or set()
         result = []
         skipped = []
+
+        # BTC 趨勢過濾：BTC 跌破 EMA20（1h）時不開新倉
+        if not self._btc_is_bullish():
+            logger.info("[OiMom] BTC 收盤低於 EMA20（1h），市場偏空，跳過所有新進場掃描")
+            return [sym for sym in symbols if sym in held]
 
         for sym in symbols:
             if sym in held:
