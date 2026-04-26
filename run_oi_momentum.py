@@ -95,6 +95,10 @@ def main() -> None:
                         help="OI 8h 最低上升比例 %%（預設 5.0）")
     parser.add_argument("--price-change-min", type=float, default=2.0,
                         help="價格 8h 最低上升比例 %%（預設 2.0）")
+    parser.add_argument("--recent-price-min", type=float, default=-2.0,
+                        help="近 2h 最低價格變化 %%（預設 -2.0；負值=允許小幅回落）")
+    parser.add_argument("--peak-retrace-max", type=float, default=5.0,
+                        help="距 8h 最高收盤最大回落 %%（預設 5.0）")
     parser.add_argument("--oi-exit-pct", type=float, default=5.0)
     parser.add_argument("--ls-shift-pct", type=float, default=10.0)
     parser.add_argument("--vol-surge-ratio", type=float, default=1.5,
@@ -168,6 +172,8 @@ def main() -> None:
         exchange=scan_exchange,
         oi_change_min=args.oi_change_min / 100,
         price_change_min=args.price_change_min / 100,
+        min_recent_price_change=args.recent_price_min / 100,
+        max_peak_retrace=args.peak_retrace_max / 100,
     )
     scanner = _OiMomentumScanner(base_scanner, oi_filter)
 

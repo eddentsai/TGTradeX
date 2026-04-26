@@ -690,6 +690,8 @@ class ServiceRunner:
         # 掛交易所保護單（SL/TP 均以實際成交價為基準）
         if position_id:
             try:
+                # 先清除開倉時附帶的舊 SL/TP（Binance -4130 問題：closePosition 單只能有一個）
+                self._exchange.cancel_all_orders(self._symbol)
                 self._exchange.place_sl_tp_orders(
                     symbol=self._symbol,
                     side=side,
