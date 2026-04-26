@@ -3,16 +3,16 @@ OI 動能做多策略（Long Only）
 
 進場邏輯（由掃描器預篩選 OI+價格同步上升幣種後的技術確認）：
   1. 收盤價 > EMA20（趨勢方向確認）
-  2. RSI < 75（避免極端超買，比背離策略略寬）
-  3. 近期成交量突破：近 3 根均量 > 前 10 根均量 × 1.5（有量撐漲）
+  2. RSI < rsi_max（避免極端超買）
+  3. 近期成交量突破：近 3 根均量 > 前 10 根均量 × vol_surge_ratio
 
 出場邏輯（結構性出場）：
   - 硬止損：進場價 × (1 - sl_pct)
+  - 固定止盈：進場漲幅 >= tp_pct
   - OI 出場：當前 OI 較峰值下跌 > oi_exit_pct（資金開始撤退）
-  - LS 出場：多空比較進場時上升 > ls_shift_pct（空方增加，動能消退）
+  - 鎖定止損：進場漲幅 >= lock_gain_pct 後，SL 移至 entry × (1 + lock_sl_pct)
   - 移動止損：進場漲幅超過 trail_activate_pct 後，每根 K 線更新交易所 SL
 
-TP 設為進場價 × 5 作為安全邊界，實際由 OI/LS 結構決定出場時機。
 絕不開空倉。
 """
 from __future__ import annotations
@@ -27,9 +27,7 @@ logger = logging.getLogger(__name__)
 
 _SL_PCT             = 0.20
 _OI_EXIT_PCT        = 0.05
-_LS_SHIFT_PCT       = 0.10
 _PERIOD             = "1h"
-_LS_LIMIT           = 3
 _TRAIL_ACTIVATE_PCT = 0.15
 _TRAIL_DISTANCE_PCT = 0.08
 _VOL_SURGE_RATIO    = 1.5   # 近 3 根均量需 > 前 10 根均量 × 此倍
@@ -51,12 +49,11 @@ class LongOiMomentumStrategy(BaseStrategy):
     Args:
         sl_pct:              硬止損比例（預設 0.20 = -20%）
         oi_exit_pct:         OI 從峰值下跌此比例時出場（預設 0.05 = 5%）
-        ls_shift_pct:        多空比較進場上升此比例時出場（預設 0.10 = 10%）
         trail_activate_pct:  移動止損啟動門檻（預設 0.15）
         trail_distance_pct:  移動止損距離（預設 0.08）
         vol_surge_ratio:     近 3 根均量需超過前 10 根均量的倍數（預設 1.5）
         rsi_max:             RSI 超買門檻（預設 75）
-        period:              Binance OI/LS API 週期
+        period:              Binance OI API 週期
         data_provider:       外部注入（測試用）
     """
 
@@ -64,7 +61,7 @@ class LongOiMomentumStrategy(BaseStrategy):
         self,
         sl_pct:             float = _SL_PCT,
         oi_exit_pct:        float = _OI_EXIT_PCT,
-        ls_shift_pct:       float = _LS_SHIFT_PCT,
+        ls_shift_pct:       float = 0.0,   # 已停用，保留參數供舊設定向下相容
         trail_activate_pct: float = _TRAIL_ACTIVATE_PCT,
         trail_distance_pct: float = _TRAIL_DISTANCE_PCT,
         vol_surge_ratio:    float = _VOL_SURGE_RATIO,
@@ -77,7 +74,6 @@ class LongOiMomentumStrategy(BaseStrategy):
     ) -> None:
         self._sl_pct             = sl_pct
         self._oi_exit_pct        = oi_exit_pct
-        self._ls_shift_pct       = ls_shift_pct
         self._trail_activate_pct = trail_activate_pct
         self._trail_distance_pct = trail_distance_pct
         self._vol_surge_ratio    = vol_surge_ratio
@@ -89,7 +85,6 @@ class LongOiMomentumStrategy(BaseStrategy):
         self._data               = data_provider or BinanceFuturesData()
         self._entry_oi:  dict[str, float] = {}
         self._peak_oi:   dict[str, float] = {}
-        self._entry_ls:  dict[str, float] = {}
 
     @property
     def name(self) -> str:
@@ -233,26 +228,6 @@ class LongOiMomentumStrategy(BaseStrategy):
                         ),
                     )
 
-        # 多空比監控：空方比例增加則出場
-        ls_hist = self._data.get_ls_ratio_history(symbol, self._period, limit=_LS_LIMIT)
-        if ls_hist:
-            curr_ls = ls_hist[-1]["longShortRatio"]
-            if symbol not in self._entry_ls:
-                self._entry_ls[symbol] = curr_ls
-            entry_ls = self._entry_ls[symbol]
-
-            if entry_ls > 0:
-                ls_shift = (curr_ls - entry_ls) / entry_ls
-                if ls_shift >= self._ls_shift_pct:
-                    self._clear_state(symbol)
-                    return Signal(
-                        action="close",
-                        reason=(
-                            f"多空比較進場上升 {ls_shift*100:.1f}%"
-                            f"（>{self._ls_shift_pct*100:.0f}%），空方持續增加"
-                        ),
-                    )
-
         # 移動止損
         if gain >= self._trail_activate_pct:
             new_sl = round(close * (1 - self._trail_distance_pct), 8)
@@ -271,20 +246,15 @@ class LongOiMomentumStrategy(BaseStrategy):
             f"OI峰={self._peak_oi[symbol]:.0f}"
             if symbol in self._peak_oi else "OI追蹤中"
         )
-        ls_info = (
-            f"LS進場={self._entry_ls[symbol]:.3f} 現={ls_hist[-1]['longShortRatio']:.3f}"
-            if ls_hist and symbol in self._entry_ls else ""
-        )
         trail_info = (
             f" trail={'啟動' if gain >= self._trail_activate_pct else f'待啟動(需+{self._trail_activate_pct*100:.0f}%)'}"
             f"(+{gain*100:.1f}%)"
         )
         return Signal(
             action="hold",
-            reason=f"持倉中 price={close:.4f} {oi_info} {ls_info}{trail_info}".strip(),
+            reason=f"持倉中 price={close:.4f} {oi_info}{trail_info}".strip(),
         )
 
     def _clear_state(self, symbol: str) -> None:
         self._entry_oi.pop(symbol, None)
         self._peak_oi.pop(symbol, None)
-        self._entry_ls.pop(symbol, None)
