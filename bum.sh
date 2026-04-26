@@ -13,7 +13,8 @@ PID_FILE="$LOG_DIR/${NAME}.pid"
 
 SERVICE_ARGS="--exchange bitunix --max-positions 3 \
     --leverage 4 --risk-pct 1.0 --sl-pct 12.5 --interval 5m --scan-interval 900 --min-volume 20000000 --top-volatile 100 \
-    --oi-exit-pct 8.0 --ls-shift-pct 15.0 --rsi-max 80 --min-sl-buffer 0"
+    --oi-exit-pct 8.0 --ls-shift-pct 15.0 --rsi-max 80 --min-sl-buffer 0 \
+    --trail-activate 10 --trail-distance 6"
 
 # ── 工具函式 ───────────────────────────────────────────────────────────────────
 
