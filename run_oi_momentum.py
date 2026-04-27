@@ -105,14 +105,16 @@ def main() -> None:
                         help="成交量突破倍數（近 3 根均量 > 前 10 根 × 此值，預設 1.5）")
     parser.add_argument("--rsi-max", type=float, default=75.0,
                         help="RSI 超買門檻（預設 75.0；動能策略建議調高至 80）")
-    parser.add_argument("--trail-activate", type=float, default=15.0)
-    parser.add_argument("--trail-distance", type=float, default=8.0)
-    parser.add_argument("--tp-pct", type=float, default=50.0,
-                        help="固定止盈：進場漲幅達此值直接出場 %%（預設 50.0）")
-    parser.add_argument("--lock-gain-pct", type=float, default=30.0,
-                        help="鎖定觸發門檻：進場漲幅達此值後上移 SL %%（預設 30.0）")
+    parser.add_argument("--trail-activate", type=float, default=60.0,
+                        help="移動止損啟動 ROI%% 門檻（預設 60.0 = 保證金收益 +60%%）")
+    parser.add_argument("--trail-distance", type=float, default=32.0,
+                        help="移動止損 ROI%% 距離（預設 32.0；換算價格距離 = 此值 ÷ 槓桿）")
+    parser.add_argument("--tp-pct", type=float, default=200.0,
+                        help="固定止盈 ROI%% 門檻（預設 200.0 = 保證金收益 +200%%）")
+    parser.add_argument("--lock-gain-pct", type=float, default=120.0,
+                        help="鎖定觸發 ROI%% 門檻（預設 120.0 = 保證金收益 +120%%）")
     parser.add_argument("--lock-sl-pct", type=float, default=10.0,
-                        help="鎖定止損位置：entry × (1 + 此值) %%（預設 10.0）")
+                        help="鎖定止損位置：entry × (1 + 此值) %%（價格%%，預設 10.0）")
     parser.add_argument("--min-sl-buffer", type=float, default=12.0,
                         help="SL 距清算價最低緩衝 %%（預設 12.0；小幣 mm_rate 較高故調低）")
     parser.add_argument("--max-consecutive-losses", type=int, default=3)
@@ -181,12 +183,13 @@ def main() -> None:
         sl_pct=args.sl_pct / 100,
         oi_exit_pct=args.oi_exit_pct / 100,
         ls_shift_pct=args.ls_shift_pct / 100,
-        trail_activate_pct=args.trail_activate / 100,
-        trail_distance_pct=args.trail_distance / 100,
+        leverage=args.leverage,
+        trail_activate_roi=args.trail_activate / 100,
+        trail_distance_roi=args.trail_distance / 100,
         vol_surge_ratio=args.vol_surge_ratio,
         rsi_max=args.rsi_max,
-        tp_pct=args.tp_pct / 100,
-        lock_gain_pct=args.lock_gain_pct / 100,
+        tp_roi=args.tp_pct / 100,
+        lock_gain_roi=args.lock_gain_pct / 100,
         lock_sl_pct=args.lock_sl_pct / 100,
         period=args.interval,
     )
@@ -215,6 +218,8 @@ def main() -> None:
         notifier=notifier,
         risk_guard=risk_guard,
         trade_journal=journal,
+        trail_activate_roi=args.trail_activate / 100,
+        trail_distance_roi=args.trail_distance / 100,
     )
 
     def _handle_signal(sig, _):

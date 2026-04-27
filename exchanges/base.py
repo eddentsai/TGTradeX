@@ -84,6 +84,16 @@ class BaseExchange(ABC):
         """
         return 0.0
 
+    def get_mark_price(self, symbol: str) -> float:
+        """
+        取得最新標記價格（預設使用最近 1m K 線收盤價代替）。
+        支援標記價格 API 的子類可覆寫此方法。
+        """
+        klines = self.get_klines(symbol, "1m", limit=2)
+        if not klines:
+            raise ValueError(f"無法取得 {symbol} 標記價格")
+        return float(klines[-1]["close"])
+
     @abstractmethod
     def get_tickers(self) -> list[dict]:
         """

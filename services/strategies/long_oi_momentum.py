@@ -28,13 +28,14 @@ logger = logging.getLogger(__name__)
 _SL_PCT             = 0.20
 _OI_EXIT_PCT        = 0.05
 _PERIOD             = "1h"
-_TRAIL_ACTIVATE_PCT = 0.15
-_TRAIL_DISTANCE_PCT = 0.08
+_LEVERAGE           = 4
+_TRAIL_ACTIVATE_ROI = 0.60  # ROI 門檻：保證金收益 ≥ 此值才啟動移動止損（預設 60%）
+_TRAIL_DISTANCE_ROI = 0.32  # ROI 距離：移動止損距現價換算 ROI（預設 32% = 價格 8%）
 _VOL_SURGE_RATIO    = 1.5   # 近 3 根均量需 > 前 10 根均量 × 此倍
 _RSI_MAX            = 75.0
-_TP_PCT             = 0.50  # 固定止盈：進場 +50% 直接出場
-_LOCK_GAIN_PCT      = 0.30  # 進場漲幅達此值後，SL 鎖定至 entry + lock_sl_pct
-_LOCK_SL_PCT        = 0.10  # 鎖定止損位置：entry × (1 + 此值)
+_TP_ROI             = 2.00  # 固定止盈 ROI 門檻（預設 200% = 價格 +50% @ 4x）
+_LOCK_GAIN_ROI      = 1.20  # 鎖定觸發 ROI 門檻（預設 120% = 價格 +30% @ 4x）
+_LOCK_SL_PCT        = 0.10  # 鎖定止損位置：entry × (1 + 此值)（仍以價格%計）
 
 _PERIOD_MAP = {
     "1m": "5m", "3m": "5m", "5m": "5m",
@@ -47,12 +48,16 @@ _PERIOD_MAP = {
 class LongOiMomentumStrategy(BaseStrategy):
     """
     Args:
-        sl_pct:              硬止損比例（預設 0.20 = -20%）
+        sl_pct:              硬止損比例（價格%，預設 0.20 = -20%）
         oi_exit_pct:         OI 從峰值下跌此比例時出場（預設 0.05 = 5%）
-        trail_activate_pct:  移動止損啟動門檻（預設 0.15）
-        trail_distance_pct:  移動止損距離（預設 0.08）
+        leverage:            槓桿倍數，用於 ROI 換算（預設 4）
+        trail_activate_roi:  移動止損啟動 ROI 門檻（預設 0.60 = 60% 保證金收益）
+        trail_distance_roi:  移動止損 ROI 距離（預設 0.32 = 32% ROI = 價格 8% @ 4x）
         vol_surge_ratio:     近 3 根均量需超過前 10 根均量的倍數（預設 1.5）
         rsi_max:             RSI 超買門檻（預設 75）
+        tp_roi:              固定止盈 ROI 門檻（預設 2.00 = 200% = 價格 +50% @ 4x）
+        lock_gain_roi:       鎖定觸發 ROI 門檻（預設 1.20 = 120% = 價格 +30% @ 4x）
+        lock_sl_pct:         鎖定止損位置（價格%，entry × (1 + 此值)，預設 0.10）
         period:              Binance OI API 週期
         data_provider:       外部注入（測試用）
     """
@@ -62,24 +67,26 @@ class LongOiMomentumStrategy(BaseStrategy):
         sl_pct:             float = _SL_PCT,
         oi_exit_pct:        float = _OI_EXIT_PCT,
         ls_shift_pct:       float = 0.0,   # 已停用，保留參數供舊設定向下相容
-        trail_activate_pct: float = _TRAIL_ACTIVATE_PCT,
-        trail_distance_pct: float = _TRAIL_DISTANCE_PCT,
+        leverage:           int   = _LEVERAGE,
+        trail_activate_roi: float = _TRAIL_ACTIVATE_ROI,
+        trail_distance_roi: float = _TRAIL_DISTANCE_ROI,
         vol_surge_ratio:    float = _VOL_SURGE_RATIO,
         rsi_max:            float = _RSI_MAX,
-        tp_pct:             float = _TP_PCT,
-        lock_gain_pct:      float = _LOCK_GAIN_PCT,
+        tp_roi:             float = _TP_ROI,
+        lock_gain_roi:      float = _LOCK_GAIN_ROI,
         lock_sl_pct:        float = _LOCK_SL_PCT,
         period:             str   = _PERIOD,
         data_provider:      BinanceFuturesData | None = None,
     ) -> None:
         self._sl_pct             = sl_pct
         self._oi_exit_pct        = oi_exit_pct
-        self._trail_activate_pct = trail_activate_pct
-        self._trail_distance_pct = trail_distance_pct
+        self._leverage           = leverage
+        self._trail_activate_roi = trail_activate_roi
+        self._trail_distance_roi = trail_distance_roi
         self._vol_surge_ratio    = vol_surge_ratio
         self._rsi_max            = rsi_max
-        self._tp_pct             = tp_pct
-        self._lock_gain_pct      = lock_gain_pct
+        self._tp_roi             = tp_roi
+        self._lock_gain_roi      = lock_gain_roi
         self._lock_sl_pct        = lock_sl_pct
         self._period             = _PERIOD_MAP.get(period, "1h")
         self._data               = data_provider or BinanceFuturesData()
@@ -130,7 +137,7 @@ class LongOiMomentumStrategy(BaseStrategy):
         # ── 通過，發出開多信號 ────────────────────────────────────────────────
         close = snap.close
         sl    = round(close * (1 - self._sl_pct), 8)
-        tp    = round(close * (1 + self._tp_pct), 8)
+        tp    = round(close * (1 + self._tp_roi / self._leverage), 8)
 
         return Signal(
             action="open_long",
@@ -139,7 +146,8 @@ class LongOiMomentumStrategy(BaseStrategy):
             reason=(
                 f"OI動能突破: EMA20={snap.ema20:.4f}"
                 + (f" RSI={snap.rsi:.1f}" if snap.rsi is not None else "")
-                + f" SL={sl:.4f}（-{self._sl_pct*100:.0f}%）TP=結構出場"
+                + f" SL={sl:.4f}（-{self._sl_pct*100:.0f}%）"
+                + f" TP={tp:.4f}（ROI+{self._tp_roi*100:.0f}%）"
             ),
         )
 
@@ -176,8 +184,9 @@ class LongOiMomentumStrategy(BaseStrategy):
         symbol = snap.symbol
         close  = snap.close
         gain   = (close - pos.entry_price) / pos.entry_price
+        roi    = gain * self._leverage  # 保證金收益率（ROI）
 
-        # 硬止損
+        # 硬止損（以價格%計）
         sl_price = pos.entry_price * (1 - self._sl_pct)
         if close <= sl_price:
             self._clear_state(symbol)
@@ -186,23 +195,23 @@ class LongOiMomentumStrategy(BaseStrategy):
                 reason=f"硬止損 price={close:.4f} ≤ SL={sl_price:.4f}（-{self._sl_pct*100:.0f}%）",
             )
 
-        # 固定止盈：進場 +tp_pct 直接出場
-        if gain >= self._tp_pct:
+        # 固定止盈：ROI 達到門檻直接出場
+        if roi >= self._tp_roi:
             self._clear_state(symbol)
             return Signal(
                 action="close",
-                reason=f"達到目標獲利 +{gain*100:.1f}%（≥{self._tp_pct*100:.0f}%），獲利了結",
+                reason=f"達到目標獲利 ROI+{roi*100:.1f}%（≥{self._tp_roi*100:.0f}%），獲利了結",
             )
 
-        # 進場 +lock_gain_pct 後：SL 至少鎖定至 entry + lock_sl_pct
-        if gain >= self._lock_gain_pct:
+        # ROI 達到鎖定門檻後：SL 至少鎖定至 entry + lock_sl_pct（價格%）
+        if roi >= self._lock_gain_roi:
             lock_sl = round(pos.entry_price * (1 + self._lock_sl_pct), 8)
             if lock_sl > pos.stop_loss:
                 return Signal(
                     action="trail_sl",
                     stop_loss=lock_sl,
                     reason=(
-                        f"進場 +{gain*100:.1f}%（≥{self._lock_gain_pct*100:.0f}%），"
+                        f"ROI+{roi*100:.1f}%（≥{self._lock_gain_roi*100:.0f}%），"
                         f"SL 鎖定至 entry+{self._lock_sl_pct*100:.0f}%={lock_sl:.4f}"
                     ),
                 )
@@ -228,17 +237,18 @@ class LongOiMomentumStrategy(BaseStrategy):
                         ),
                     )
 
-        # 移動止損
-        if gain >= self._trail_activate_pct:
-            new_sl = round(close * (1 - self._trail_distance_pct), 8)
+        # 移動止損（ROI 達門檻後啟動，距離以 ROI 換算回價格%）
+        if roi >= self._trail_activate_roi:
+            trail_price_dist = self._trail_distance_roi / self._leverage
+            new_sl = round(close * (1 - trail_price_dist), 8)
             if new_sl > pos.stop_loss:
                 return Signal(
                     action="trail_sl",
                     stop_loss=new_sl,
                     reason=(
                         f"移動止損上移 SL {pos.stop_loss:.4f} → {new_sl:.4f}"
-                        f"（距現價 -{self._trail_distance_pct*100:.0f}%，"
-                        f"進場 +{gain*100:.1f}%）"
+                        f"（ROI距離 -{self._trail_distance_roi*100:.0f}%，"
+                        f"ROI+{roi*100:.1f}%）"
                     ),
                 )
 
@@ -247,8 +257,7 @@ class LongOiMomentumStrategy(BaseStrategy):
             if symbol in self._peak_oi else "OI追蹤中"
         )
         trail_info = (
-            f" trail={'啟動' if gain >= self._trail_activate_pct else f'待啟動(需+{self._trail_activate_pct*100:.0f}%)'}"
-            f"(+{gain*100:.1f}%)"
+            f" trail={'啟動' if roi >= self._trail_activate_roi else f'待啟動(ROI需+{self._trail_activate_roi*100:.0f}%,現ROI+{roi*100:.1f}%)'}"
         )
         return Signal(
             action="hold",

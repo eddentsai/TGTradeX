@@ -70,6 +70,8 @@ class RunnerManager:
         notifier: TelegramNotifier | None = None,
         risk_guard: RiskGuard | None = None,
         trade_journal: TradeJournal | None = None,
+        trail_activate_roi: float = 0.0,
+        trail_distance_roi: float = 0.0,
     ) -> None:
         self._exchange = exchange
         self._scanner = scanner
@@ -81,6 +83,8 @@ class RunnerManager:
         self._enable_ensemble = enable_ensemble
         self._ensemble_strategies = ensemble_strategies or []
         self._ensemble_min_confirm = ensemble_min_confirm
+        self._trail_activate_roi = trail_activate_roi
+        self._trail_distance_roi = trail_distance_roi
 
         if enable_ensemble and not self._ensemble_strategies:
             raise ValueError("enable_ensemble=True 時，ensemble_strategies 不可為空")
@@ -248,6 +252,9 @@ class RunnerManager:
             notifier=self._notifier,
             risk_guard=self._risk_guard,
             trade_journal=self._trade_journal,
+            trail_activate_roi=self._trail_activate_roi,
+            trail_distance_roi=self._trail_distance_roi,
+            leverage=self._sizer.leverage,
         )
         thread = threading.Thread(
             target=runner.run,

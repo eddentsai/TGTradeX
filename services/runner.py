@@ -148,6 +148,10 @@ class ServiceRunner:
         notifier: TelegramNotifier | None = None,
         risk_guard: RiskGuard | None = None,
         trade_journal: TradeJournal | None = None,
+        trail_activate_roi: float = 0.0,
+        trail_distance_roi: float = 0.0,
+        leverage: int = 1,
+        price_monitor_interval: int = 60,
     ) -> None:
         if sizer is None and fixed_qty is None:
             raise ValueError("必須提供 sizer 或 fixed_qty 其中之一")
@@ -166,12 +170,19 @@ class ServiceRunner:
         self._trade_journal = trade_journal
         self._interval_sec = _INTERVAL_SECONDS.get(interval, 900)
 
+        # 快速價格監控參數（ROI 基準，0 = 停用）
+        self._trail_activate_roi    = trail_activate_roi
+        self._trail_distance_roi    = trail_distance_roi
+        self._monitor_leverage      = leverage
+        self._price_monitor_interval = price_monitor_interval
+
         # 資金費率快取（避免每根 K 線都呼叫 API）
         self._fr_cache: float = 0.0
         self._fr_cache_time: float = 0.0
 
         self._active_pos: ActivePosition | None = None
         self._stop_event = threading.Event()
+        self._pos_lock   = threading.Lock()  # 保護 _active_pos 的跨執行緒存取
 
         # 自動切換模式的策略映射（_fixed_strategy 不為 None 時不使用）
         self._strategies: dict[MarketState, BaseStrategy] = {
@@ -205,6 +216,19 @@ class ServiceRunner:
             f"exchange={self._exchange.name} symbol={self._symbol} "
             f"interval={self._interval} {qty_desc}"
         )
+
+        if self._trail_activate_roi > 0:
+            monitor_thread = threading.Thread(
+                target=self._price_monitor_loop,
+                name=f"price-monitor-{self._symbol}",
+                daemon=True,
+            )
+            monitor_thread.start()
+            logger.debug(
+                f"[{self._symbol}] 快速價格監控啟動"
+                f"（每 {self._price_monitor_interval}s，trail ROI≥{self._trail_activate_roi*100:.0f}%）"
+            )
+
         while not self._stop_event.is_set():
             try:
                 self._run_cycle_with_retry()
@@ -933,32 +957,111 @@ class ServiceRunner:
             )
             return
 
-        # 取消現有 SL/TP 條件單
-        try:
-            self._exchange.cancel_all_orders(self._symbol)
-        except Exception as e:
-            logger.warning(f"[{self._symbol}] 移動止損：取消舊條件單失敗: {e}")
+        with self._pos_lock:
+            # 監控執行緒可能已搶先更新，若新 SL 已不更優則跳過
+            if new_sl <= active_pos.stop_loss:
+                return
 
-        # 重掛新 SL + 原始 TP
-        try:
-            self._exchange.place_sl_tp_orders(
-                symbol=self._symbol,
-                side=active_pos.side,
-                qty=active_pos.qty,
-                sl_price=new_sl,
-                tp_price=new_tp,
-                position_id=active_pos.position_id,
-            )
-        except Exception as e:
-            logger.warning(f"[{self._symbol}] 移動止損：重掛條件單失敗: {e}")
-            return
+            try:
+                self._exchange.cancel_all_orders(self._symbol)
+            except Exception as e:
+                logger.warning(f"[{self._symbol}] 移動止損：取消舊條件單失敗: {e}")
 
-        # 更新本地狀態
-        close = snap.close
-        if active_pos.side == "BUY":
-            active_pos.peak_price = max(active_pos.peak_price or active_pos.entry_price, close)
-        else:
-            active_pos.peak_price = min(active_pos.peak_price or active_pos.entry_price, close)
-        active_pos.stop_loss = new_sl
-        pos_save(self._exchange.name, self._symbol, active_pos)
+            try:
+                self._exchange.place_sl_tp_orders(
+                    symbol=self._symbol,
+                    side=active_pos.side,
+                    qty=active_pos.qty,
+                    sl_price=new_sl,
+                    tp_price=new_tp,
+                    position_id=active_pos.position_id,
+                )
+            except Exception as e:
+                logger.warning(f"[{self._symbol}] 移動止損：重掛條件單失敗: {e}")
+                return
+
+            close = snap.close
+            if active_pos.side == "BUY":
+                active_pos.peak_price = max(active_pos.peak_price or active_pos.entry_price, close)
+            else:
+                active_pos.peak_price = min(active_pos.peak_price or active_pos.entry_price, close)
+            active_pos.stop_loss = new_sl
+            pos_save(self._exchange.name, self._symbol, active_pos)
+
         logger.info(f"[{self._symbol}] 移動止損更新  {signal.reason}")
+
+    # ── 快速價格監控 ──────────────────────────────────────────────────────────
+
+    def _price_monitor_loop(self) -> None:
+        """持倉期間每 price_monitor_interval 秒查一次標記價格，更新移動止損。"""
+        while not self._stop_event.is_set():
+            self._stop_event.wait(timeout=self._price_monitor_interval)
+            if self._stop_event.is_set():
+                break
+            with self._pos_lock:
+                pos = self._active_pos
+            if pos is None:
+                continue
+            try:
+                mark = self._exchange.get_mark_price(self._symbol)
+                self._monitor_update_trail(mark)
+            except Exception as e:
+                logger.debug(f"[{self._symbol}] 快速監控取價失敗: {e}")
+
+    def _monitor_update_trail(self, mark_price: float) -> None:
+        """根據標記價更新移動止損（執行緒安全，由快速監控執行緒呼叫）。"""
+        with self._pos_lock:
+            pos = self._active_pos
+            if pos is None or pos.side != "BUY":
+                return
+            if self._trail_activate_roi <= 0 or self._monitor_leverage <= 0:
+                return
+
+            gain = (mark_price - pos.entry_price) / pos.entry_price
+            roi  = gain * self._monitor_leverage
+            if roi < self._trail_activate_roi:
+                return
+
+            trail_price_dist = self._trail_distance_roi / self._monitor_leverage
+            new_sl = round(mark_price * (1 - trail_price_dist), 8)
+            old_sl = pos.stop_loss
+            if new_sl <= old_sl:
+                return
+
+            new_tp = pos.take_profit
+
+            if self._dry_run:
+                logger.info(
+                    f"[DRY-RUN][快速監控] 移動止損"
+                    f" SL {old_sl:.4f} → {new_sl:.4f}"
+                    f"  ROI+{roi*100:.1f}%  標記價={mark_price:.4f}"
+                )
+                return
+
+            try:
+                self._exchange.cancel_all_orders(self._symbol)
+            except Exception as e:
+                logger.warning(f"[{self._symbol}] 快速監控：取消舊條件單失敗: {e}")
+
+            try:
+                self._exchange.place_sl_tp_orders(
+                    symbol=self._symbol,
+                    side=pos.side,
+                    qty=pos.qty,
+                    sl_price=new_sl,
+                    tp_price=new_tp,
+                    position_id=pos.position_id,
+                )
+            except Exception as e:
+                logger.warning(f"[{self._symbol}] 快速監控：重掛條件單失敗: {e}")
+                return
+
+            pos.peak_price = max(pos.peak_price or pos.entry_price, mark_price)
+            pos.stop_loss  = new_sl
+            pos_save(self._exchange.name, self._symbol, pos)
+
+        logger.info(
+            f"[{self._symbol}] [快速監控] 移動止損上移"
+            f" SL {old_sl:.4f} → {new_sl:.4f}"
+            f"  ROI+{roi*100:.1f}%  標記價={mark_price:.4f}"
+        )
