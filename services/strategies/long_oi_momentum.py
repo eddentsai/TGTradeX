@@ -7,7 +7,7 @@ OI 動能做多策略（Long Only）
   3. 近期成交量突破：近 3 根均量 > 前 10 根均量 × vol_surge_ratio
 
 出場邏輯（結構性出場）：
-  - 硬止損：進場價 × (1 - sl_pct)
+  - 硬止損：ROI ≤ -sl_roi（例如 sl_roi=0.50 → ROI -50% 出場）
   - 固定止盈：進場漲幅 >= tp_pct
   - OI 出場：當前 OI 較峰值下跌 > oi_exit_pct（資金開始撤退）
   - 鎖定止損：進場漲幅 >= lock_gain_pct 後，SL 移至 entry × (1 + lock_sl_pct)
@@ -25,7 +25,7 @@ from services.strategies.base import ActivePosition, BaseStrategy, Signal
 
 logger = logging.getLogger(__name__)
 
-_SL_PCT             = 0.20
+_SL_ROI             = 0.50  # 硬止損 ROI 門檻（預設 50% = 價格 -12.5% @ 4x）
 _OI_EXIT_PCT        = 0.05
 _PERIOD             = "1h"
 _LEVERAGE           = 4
@@ -48,7 +48,7 @@ _PERIOD_MAP = {
 class LongOiMomentumStrategy(BaseStrategy):
     """
     Args:
-        sl_pct:              硬止損比例（價格%，預設 0.20 = -20%）
+        sl_roi:              硬止損 ROI 門檻（預設 0.50 = ROI -50%，4x 槓桿對應價格 -12.5%）
         oi_exit_pct:         OI 從峰值下跌此比例時出場（預設 0.05 = 5%）
         leverage:            槓桿倍數，用於 ROI 換算（預設 4）
         trail_activate_roi:  移動止損啟動 ROI 門檻（預設 0.60 = 60% 保證金收益）
@@ -64,7 +64,7 @@ class LongOiMomentumStrategy(BaseStrategy):
 
     def __init__(
         self,
-        sl_pct:             float = _SL_PCT,
+        sl_roi:             float = _SL_ROI,
         oi_exit_pct:        float = _OI_EXIT_PCT,
         ls_shift_pct:       float = 0.0,   # 已停用，保留參數供舊設定向下相容
         leverage:           int   = _LEVERAGE,
@@ -78,7 +78,7 @@ class LongOiMomentumStrategy(BaseStrategy):
         period:             str   = _PERIOD,
         data_provider:      BinanceFuturesData | None = None,
     ) -> None:
-        self._sl_pct             = sl_pct
+        self._sl_roi             = sl_roi
         self._oi_exit_pct        = oi_exit_pct
         self._leverage           = leverage
         self._trail_activate_roi = trail_activate_roi
@@ -136,7 +136,7 @@ class LongOiMomentumStrategy(BaseStrategy):
 
         # ── 通過，發出開多信號 ────────────────────────────────────────────────
         close = snap.close
-        sl    = round(close * (1 - self._sl_pct), 8)
+        sl    = round(close * (1 - self._sl_roi / self._leverage), 8)
         tp    = round(close * (1 + self._tp_roi / self._leverage), 8)
 
         return Signal(
@@ -146,7 +146,7 @@ class LongOiMomentumStrategy(BaseStrategy):
             reason=(
                 f"OI動能突破: EMA20={snap.ema20:.4f}"
                 + (f" RSI={snap.rsi:.1f}" if snap.rsi is not None else "")
-                + f" SL={sl:.4f}（-{self._sl_pct*100:.0f}%）"
+                + f" SL={sl:.4f}（ROI-{self._sl_roi*100:.0f}%）"
                 + f" TP={tp:.4f}（ROI+{self._tp_roi*100:.0f}%）"
             ),
         )
@@ -186,13 +186,12 @@ class LongOiMomentumStrategy(BaseStrategy):
         gain   = (close - pos.entry_price) / pos.entry_price
         roi    = gain * self._leverage  # 保證金收益率（ROI）
 
-        # 硬止損（以價格%計）
-        sl_price = pos.entry_price * (1 - self._sl_pct)
-        if close <= sl_price:
+        # 硬止損（以 ROI% 計）
+        if roi <= -self._sl_roi:
             self._clear_state(symbol)
             return Signal(
                 action="close",
-                reason=f"硬止損 price={close:.4f} ≤ SL={sl_price:.4f}（-{self._sl_pct*100:.0f}%）",
+                reason=f"硬止損 ROI={roi*100:.1f}%（≤-{self._sl_roi*100:.0f}%）price={close:.4f}",
             )
 
         # 固定止盈：ROI 達到門檻直接出場

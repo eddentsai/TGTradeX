@@ -89,8 +89,8 @@ def main() -> None:
                         choices=["5m", "15m", "30m", "1h", "2h", "4h"])
     parser.add_argument("--leverage", type=int, default=4)
     parser.add_argument("--risk-pct", type=float, default=1.0)
-    parser.add_argument("--sl-pct", type=float, default=11.0,
-                        help="硬止損比例 %（預設 11.0）")
+    parser.add_argument("--sl-pct", type=float, default=50.0,
+                        help="硬止損 ROI%% 門檻（預設 50.0 = ROI -50%%；4x 槓桿對應價格 -12.5%%）")
     parser.add_argument("--oi-change-min", type=float, default=5.0,
                         help="OI 8h 最低上升比例 %%（預設 5.0）")
     parser.add_argument("--price-change-min", type=float, default=2.0,
@@ -180,7 +180,7 @@ def main() -> None:
     scanner = _OiMomentumScanner(base_scanner, oi_filter)
 
     strategy = LongOiMomentumStrategy(
-        sl_pct=args.sl_pct / 100,
+        sl_roi=args.sl_pct / 100,
         oi_exit_pct=args.oi_exit_pct / 100,
         ls_shift_pct=args.ls_shift_pct / 100,
         leverage=args.leverage,
@@ -220,6 +220,7 @@ def main() -> None:
         trade_journal=journal,
         trail_activate_roi=args.trail_activate / 100,
         trail_distance_roi=args.trail_distance / 100,
+        sl_roi=args.sl_pct / 100,
     )
 
     def _handle_signal(sig, _):

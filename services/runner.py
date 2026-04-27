@@ -150,6 +150,7 @@ class ServiceRunner:
         trade_journal: TradeJournal | None = None,
         trail_activate_roi: float = 0.0,
         trail_distance_roi: float = 0.0,
+        sl_roi: float = 0.0,
         leverage: int = 1,
         price_monitor_interval: int = 60,
     ) -> None:
@@ -173,6 +174,7 @@ class ServiceRunner:
         # 快速價格監控參數（ROI 基準，0 = 停用）
         self._trail_activate_roi    = trail_activate_roi
         self._trail_distance_roi    = trail_distance_roi
+        self._sl_roi                = sl_roi
         self._monitor_leverage      = leverage
         self._price_monitor_interval = price_monitor_interval
 
@@ -1004,9 +1006,47 @@ class ServiceRunner:
                 continue
             try:
                 mark = self._exchange.get_mark_price(self._symbol)
-                self._monitor_update_trail(mark)
+                if not self._monitor_hard_sl(mark):
+                    self._monitor_update_trail(mark)
             except Exception as e:
                 logger.debug(f"[{self._symbol}] 快速監控取價失敗: {e}")
+
+    def _monitor_hard_sl(self, mark_price: float) -> bool:
+        """標記價格觸發 ROI 硬止損時直接市價平倉。回傳 True 代表已觸發平倉。"""
+        with self._pos_lock:
+            pos = self._active_pos
+            if pos is None or pos.side != "BUY":
+                return False
+            if self._sl_roi <= 0 or self._monitor_leverage <= 0:
+                return False
+            roi = (mark_price - pos.entry_price) / pos.entry_price * self._monitor_leverage
+            if roi > -self._sl_roi:
+                return False
+            # 先清除 _active_pos，防止主迴圈或監控執行緒重複觸發
+            self._active_pos = None
+
+        reason = (
+            f"快速監控硬止損 ROI={roi*100:.1f}%"
+            f"（≤-{self._sl_roi*100:.0f}%）標記價={mark_price:.4f}"
+        )
+        logger.warning(f"[{self._symbol}] {reason}")
+
+        if self._dry_run:
+            logger.info(f"[DRY-RUN][快速監控] 硬止損觸發，不執行平倉")
+            return True
+
+        signal = Signal(action="close", reason=reason)
+        try:
+            self._close_position(signal, pos, mark_price)
+        except Exception as e:
+            logger.error(f"[{self._symbol}] 快速監控硬止損平倉失敗: {e}")
+            # 還原 _active_pos，讓主迴圈繼續管理
+            with self._pos_lock:
+                if self._active_pos is None:
+                    self._active_pos = pos
+            return False
+
+        return True
 
     def _monitor_update_trail(self, mark_price: float) -> None:
         """根據標記價更新移動止損（執行緒安全，由快速監控執行緒呼叫）。"""

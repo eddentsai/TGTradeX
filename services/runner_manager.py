@@ -72,6 +72,7 @@ class RunnerManager:
         trade_journal: TradeJournal | None = None,
         trail_activate_roi: float = 0.0,
         trail_distance_roi: float = 0.0,
+        sl_roi: float = 0.0,
     ) -> None:
         self._exchange = exchange
         self._scanner = scanner
@@ -85,6 +86,7 @@ class RunnerManager:
         self._ensemble_min_confirm = ensemble_min_confirm
         self._trail_activate_roi = trail_activate_roi
         self._trail_distance_roi = trail_distance_roi
+        self._sl_roi             = sl_roi
 
         if enable_ensemble and not self._ensemble_strategies:
             raise ValueError("enable_ensemble=True 時，ensemble_strategies 不可為空")
@@ -254,6 +256,7 @@ class RunnerManager:
             trade_journal=self._trade_journal,
             trail_activate_roi=self._trail_activate_roi,
             trail_distance_roi=self._trail_distance_roi,
+            sl_roi=self._sl_roi,
             leverage=self._sizer.leverage,
         )
         thread = threading.Thread(
