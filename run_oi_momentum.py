@@ -87,6 +87,9 @@ def main() -> None:
                         help="幣種重新掃描間隔秒數（預設 900 = 15 分鐘）")
     parser.add_argument("--interval", default="15m",
                         choices=["5m", "15m", "30m", "1h", "2h", "4h"])
+    parser.add_argument("--confirm-period", default=None,
+                        choices=["15m", "30m", "1h", "2h", "4h"],
+                        help="多週期確認：進場前額外檢查此週期 EMA20/RSI（例如 --interval 15m --confirm-period 1h）")
     parser.add_argument("--leverage", type=int, default=4)
     parser.add_argument("--risk-pct", type=float, default=1.0)
     parser.add_argument("--sl-pct", type=float, default=50.0,
@@ -139,6 +142,7 @@ def main() -> None:
         f"  top_volatile    = {args.top_volatile}\n"
         f"  scan_interval   = {args.scan_interval}s\n"
         f"  interval        = {args.interval}\n"
+        f"  confirm_period  = {args.confirm_period or '無'}\n"
         f"  leverage        = {args.leverage}x\n"
         f"  risk_pct        = {args.risk_pct}%\n"
         f"  sl_pct          = -{args.sl_pct}%\n"
@@ -221,6 +225,7 @@ def main() -> None:
         trail_activate_roi=args.trail_activate / 100,
         trail_distance_roi=args.trail_distance / 100,
         sl_roi=args.sl_pct / 100,
+        confirm_interval=args.confirm_period,
     )
 
     def _handle_signal(sig, _):

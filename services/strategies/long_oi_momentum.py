@@ -115,21 +115,37 @@ class LongOiMomentumStrategy(BaseStrategy):
         if snap.close is None or snap.ema20 is None:
             return Signal(action="hold", reason="指標不足")
 
-        # 1. 收盤站上 EMA20
+        # 1. 收盤站上 EMA20（主週期）
         if snap.close <= snap.ema20:
             return Signal(
                 action="hold",
                 reason=f"收盤 {snap.close:.4f} ≤ EMA20 {snap.ema20:.4f}，等待確認",
             )
 
-        # 2. RSI 過濾
+        # 2. RSI 過濾（主週期）
         if snap.rsi is not None and snap.rsi >= self._rsi_max:
             return Signal(
                 action="hold",
                 reason=f"RSI {snap.rsi:.1f} 超買（≥{self._rsi_max:.0f}），等待回落",
             )
 
-        # 3. 成交量突破確認
+        # 3. 高週期趨勢確認（若 runner 提供 confirm_snap）
+        if snap.confirm_snap is not None:
+            cs = snap.confirm_snap
+            if cs.close is None or cs.ema20 is None:
+                return Signal(action="hold", reason="確認週期指標不足")
+            if cs.close <= cs.ema20:
+                return Signal(
+                    action="hold",
+                    reason=f"[確認週期] 收盤 {cs.close:.4f} ≤ EMA20 {cs.ema20:.4f}，高週期趨勢未確認",
+                )
+            if cs.rsi is not None and cs.rsi >= self._rsi_max:
+                return Signal(
+                    action="hold",
+                    reason=f"[確認週期] RSI {cs.rsi:.1f} 超買（≥{self._rsi_max:.0f}），等待回落",
+                )
+
+        # 4. 成交量突破確認（主週期）
         vol_check = self._check_vol_surge(snap.klines)
         if vol_check is not None:
             return vol_check

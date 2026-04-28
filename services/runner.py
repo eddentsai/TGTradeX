@@ -153,6 +153,7 @@ class ServiceRunner:
         sl_roi: float = 0.0,
         leverage: int = 1,
         price_monitor_interval: int = 60,
+        confirm_interval: str | None = None,
     ) -> None:
         if sizer is None and fixed_qty is None:
             raise ValueError("必須提供 sizer 或 fixed_qty 其中之一")
@@ -177,6 +178,7 @@ class ServiceRunner:
         self._sl_roi                = sl_roi
         self._monitor_leverage      = leverage
         self._price_monitor_interval = price_monitor_interval
+        self._confirm_interval      = confirm_interval
 
         # 資金費率快取（避免每根 K 線都呼叫 API）
         self._fr_cache: float = 0.0
@@ -319,6 +321,27 @@ class ServiceRunner:
         # 2. 計算指標（傳入原始 K 線數據與週期，讓 change_24h_pct 正確換算根數）
         snap = compute_indicators(candles, interval=self._interval)
         snap.symbol = self._symbol
+
+        # 2b. 若設定確認週期（多週期確認），抓取高週期 K 線並附加到 snap
+        if self._confirm_interval:
+            try:
+                raw_confirm = self._exchange.get_klines(
+                    self._symbol,
+                    self._confirm_interval,
+                    limit=_KLINE_LIMIT.get(self._confirm_interval, 100),
+                )
+                candles_confirm = candles_from_raw(raw_confirm)
+                if len(candles_confirm) >= 30:
+                    confirm_snap = compute_indicators(candles_confirm, interval=self._confirm_interval)
+                    confirm_snap.symbol = self._symbol
+                    snap.confirm_snap = confirm_snap
+                else:
+                    logger.warning(
+                        f"[{self._symbol}] 確認週期 {self._confirm_interval} K 線不足"
+                        f"（{len(candles_confirm)} 根），跳過多週期確認"
+                    )
+            except Exception as e:
+                logger.warning(f"[{self._symbol}] 取得確認週期 K 線失敗，跳過多週期確認: {e}")
 
         # 3. 識別市場狀態
         state = classify_market(snap)

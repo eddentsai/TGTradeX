@@ -75,6 +75,9 @@ class IndicatorSnapshot:
     # 正值 = 漲，負值 = 跌；K 線不足 24h 時為 None
     change_24h_pct: float | None = None
 
+    # 多週期確認：高週期的指標快照（由 runner 填入，strategy 用於進場過濾）
+    confirm_snap: IndicatorSnapshot | None = None
+
 
 # ── 公開介面 ──────────────────────────────────────────────────────────────────
 
