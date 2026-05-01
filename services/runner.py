@@ -154,6 +154,7 @@ class ServiceRunner:
         leverage: int = 1,
         price_monitor_interval: int = 60,
         confirm_interval: str | None = None,
+        pre_close_sec: int = 0,
     ) -> None:
         if sizer is None and fixed_qty is None:
             raise ValueError("必須提供 sizer 或 fixed_qty 其中之一")
@@ -179,6 +180,7 @@ class ServiceRunner:
         self._monitor_leverage      = leverage
         self._price_monitor_interval = price_monitor_interval
         self._confirm_interval      = confirm_interval
+        self._pre_close_sec         = pre_close_sec
 
         # 資金費率快取（避免每根 K 線都呼叫 API）
         self._fr_cache: float = 0.0
@@ -255,21 +257,34 @@ class ServiceRunner:
 
     # ── 等待下一根 K 線 ───────────────────────────────────────────────────────
 
-    def _sleep_until_next_candle(self, offset_sec: int = 5) -> None:
+    def _sleep_until_next_candle(self) -> None:
         """
-        睡眠到下一個 K 線整點邊界後 offset_sec 秒。
-        例如 1h 週期在 00:59:57 呼叫，會睡到 01:00:05。
+        若設定 pre_close_sec > 0：睡到下一根 K 線收盤前 pre_close_sec 秒喚醒，
+        以近收盤時的指標評估進場（避免追下一根 K 線開盤）。
+        否則（預設）：睡到 K 線收盤後 5 秒（評估剛收盤的 K 線）。
         分段睡眠以便能及時響應停止信號。
         """
+        if self._pre_close_sec > 0:
+            offset_sec = -self._pre_close_sec
+            label = f"收盤前 {self._pre_close_sec}s"
+        else:
+            offset_sec = 5
+            label = "收盤後 5s"
+
         now = time.time()
         next_boundary = (int(now) // self._interval_sec + 1) * self._interval_sec
         sleep_sec = next_boundary + offset_sec - now
-        wake_time = time.strftime(
-            "%H:%M:%S", time.localtime(next_boundary + offset_sec)
-        )
+
+        # 若目標時間已過（例如剛完成週期，下一個 pre-close 點在本 K 線內已過），
+        # 跳至下下一根 K 線的同一時間點
+        if sleep_sec <= 0:
+            next_boundary += self._interval_sec
+            sleep_sec = next_boundary + offset_sec - now
+
+        wake_time = time.strftime("%H:%M:%S", time.localtime(next_boundary + offset_sec))
         logger.debug(
-            f"[{self._symbol}] 等待下一根 {self._interval} K 線，"
-            f"睡眠 {sleep_sec:.1f}s（預計 {wake_time} 喚醒）"
+            f"[{self._symbol}] 等待下一評估點（{label}）"
+            f"  睡眠 {sleep_sec:.1f}s  預計 {wake_time} 喚醒"
         )
         while sleep_sec > 0 and not self._stop_event.is_set():
             chunk = min(sleep_sec, 10)

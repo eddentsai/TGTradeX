@@ -118,8 +118,12 @@ def main() -> None:
                         help="鎖定觸發 ROI%% 門檻（預設 120.0 = 保證金收益 +120%%）")
     parser.add_argument("--lock-sl-pct", type=float, default=10.0,
                         help="鎖定止損位置：entry × (1 + 此值) %%（價格%%，預設 10.0）")
+    parser.add_argument("--max-ema-ext", type=float, default=8.0,
+                        help="收盤距 EMA20 最大延伸 %%（預設 8.0；超過視為追高跳過進場）；0 = 停用")
     parser.add_argument("--min-sl-buffer", type=float, default=12.0,
                         help="SL 距清算價最低緩衝 %%（預設 12.0；小幣 mm_rate 較高故調低）")
+    parser.add_argument("--pre-close-sec", type=int, default=60,
+                        help="在 K 線收盤前幾秒評估進場（預設 60；0 = 收盤後 5s 評估）")
     parser.add_argument("--max-consecutive-losses", type=int, default=3)
     parser.add_argument("--max-daily-loss", type=float, default=10.0)
     parser.add_argument("--dry-run", action="store_true")
@@ -149,6 +153,8 @@ def main() -> None:
         f"  oi_change_min   = +{args.oi_change_min}%（OI 8h）\n"
         f"  price_change_min= +{args.price_change_min}%（價格 8h）\n"
         f"  vol_surge_ratio = {args.vol_surge_ratio}x\n"
+        f"  max_ema_ext     = {args.max_ema_ext}%（{'停用' if args.max_ema_ext == 0 else '距EMA20最大延伸'}）\n"
+        f"  pre_close_sec   = {args.pre_close_sec}s（{'收盤後5s' if args.pre_close_sec == 0 else f'收盤前{args.pre_close_sec}s評估'}）\n"
         f"  dry_run         = {args.dry_run}"
     )
 
@@ -195,6 +201,7 @@ def main() -> None:
         tp_roi=args.tp_pct / 100,
         lock_gain_roi=args.lock_gain_pct / 100,
         lock_sl_pct=args.lock_sl_pct / 100,
+        max_ema_ext=args.max_ema_ext / 100,
         period=args.interval,
     )
 
@@ -226,6 +233,7 @@ def main() -> None:
         trail_distance_roi=args.trail_distance / 100,
         sl_roi=args.sl_pct / 100,
         confirm_interval=args.confirm_period,
+        pre_close_sec=args.pre_close_sec,
     )
 
     def _handle_signal(sig, _):

@@ -74,6 +74,7 @@ class RunnerManager:
         trail_distance_roi: float = 0.0,
         sl_roi: float = 0.0,
         confirm_interval: str | None = None,
+        pre_close_sec: int = 0,
     ) -> None:
         self._exchange = exchange
         self._scanner = scanner
@@ -89,6 +90,7 @@ class RunnerManager:
         self._trail_distance_roi = trail_distance_roi
         self._sl_roi             = sl_roi
         self._confirm_interval   = confirm_interval
+        self._pre_close_sec      = pre_close_sec
 
         if enable_ensemble and not self._ensemble_strategies:
             raise ValueError("enable_ensemble=True 時，ensemble_strategies 不可為空")
@@ -261,6 +263,7 @@ class RunnerManager:
             sl_roi=self._sl_roi,
             leverage=self._sizer.leverage,
             confirm_interval=self._confirm_interval,
+            pre_close_sec=self._pre_close_sec,
         )
         thread = threading.Thread(
             target=runner.run,

@@ -36,6 +36,7 @@ _RSI_MAX            = 75.0
 _TP_ROI             = 2.00  # 固定止盈 ROI 門檻（預設 200% = 價格 +50% @ 4x）
 _LOCK_GAIN_ROI      = 1.20  # 鎖定觸發 ROI 門檻（預設 120% = 價格 +30% @ 4x）
 _LOCK_SL_PCT        = 0.10  # 鎖定止損位置：entry × (1 + 此值)（仍以價格%計）
+_MAX_EMA_EXT        = 0.08  # 收盤距 EMA20 最大延伸比例（預設 8%；超過視為追高）
 
 _PERIOD_MAP = {
     "1m": "5m", "3m": "5m", "5m": "5m",
@@ -75,6 +76,7 @@ class LongOiMomentumStrategy(BaseStrategy):
         tp_roi:             float = _TP_ROI,
         lock_gain_roi:      float = _LOCK_GAIN_ROI,
         lock_sl_pct:        float = _LOCK_SL_PCT,
+        max_ema_ext:        float = _MAX_EMA_EXT,
         period:             str   = _PERIOD,
         data_provider:      BinanceFuturesData | None = None,
     ) -> None:
@@ -88,6 +90,7 @@ class LongOiMomentumStrategy(BaseStrategy):
         self._tp_roi             = tp_roi
         self._lock_gain_roi      = lock_gain_roi
         self._lock_sl_pct        = lock_sl_pct
+        self._max_ema_ext        = max_ema_ext
         self._period             = _PERIOD_MAP.get(period, "1h")
         self._data               = data_provider or BinanceFuturesData()
         self._entry_oi:  dict[str, float] = {}
@@ -122,6 +125,18 @@ class LongOiMomentumStrategy(BaseStrategy):
                 reason=f"收盤 {snap.close:.4f} ≤ EMA20 {snap.ema20:.4f}，等待確認",
             )
 
+        # 1b. EMA20 延伸過濾：避免追高（主週期）
+        if self._max_ema_ext > 0:
+            ext = (snap.close - snap.ema20) / snap.ema20
+            if ext > self._max_ema_ext:
+                return Signal(
+                    action="hold",
+                    reason=(
+                        f"距 EMA20 延伸 {ext*100:.1f}%（>{self._max_ema_ext*100:.0f}%），"
+                        f"追高風險，等待回落貼近均線"
+                    ),
+                )
+
         # 2. RSI 過濾（主週期）
         if snap.rsi is not None and snap.rsi >= self._rsi_max:
             return Signal(
@@ -144,6 +159,18 @@ class LongOiMomentumStrategy(BaseStrategy):
                     action="hold",
                     reason=f"[確認週期] RSI {cs.rsi:.1f} 超買（≥{self._rsi_max:.0f}），等待回落",
                 )
+            # 高週期 EMA20 延伸過濾（門檻放寬 50%，高週期均線反應較慢）
+            if self._max_ema_ext > 0:
+                cs_ext = (cs.close - cs.ema20) / cs.ema20
+                cs_threshold = self._max_ema_ext * 1.5
+                if cs_ext > cs_threshold:
+                    return Signal(
+                        action="hold",
+                        reason=(
+                            f"[確認週期] 距 EMA20 延伸 {cs_ext*100:.1f}%"
+                            f"（>{cs_threshold*100:.0f}%），等待回落"
+                        ),
+                    )
 
         # 4. 成交量突破確認（主週期）
         vol_check = self._check_vol_surge(snap.klines)
