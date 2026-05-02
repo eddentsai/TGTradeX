@@ -120,6 +120,12 @@ def main() -> None:
                         help="鎖定止損位置：entry × (1 + 此值) %%（價格%%，預設 10.0）")
     parser.add_argument("--max-ema-ext", type=float, default=8.0,
                         help="收盤距 EMA20 最大延伸 %%（預設 8.0；超過視為追高跳過進場）；0 = 停用")
+    parser.add_argument("--enable-reverse", action="store_true",
+                        help="出場條件觸發時自動開反向空單")
+    parser.add_argument("--reverse-tp-pct", type=float, default=20.0,
+                        help="反向空單止盈 ROI%% （預設 20.0 = 保證金收益 +20%%）")
+    parser.add_argument("--reverse-sl-pct", type=float, default=5.0,
+                        help="反向空單止損 ROI%% （預設 5.0 = 保證金虧損 -5%%）")
     parser.add_argument("--min-sl-buffer", type=float, default=12.0,
                         help="SL 距清算價最低緩衝 %%（預設 12.0；小幣 mm_rate 較高故調低）")
     parser.add_argument("--pre-close-sec", type=int, default=60,
@@ -155,6 +161,8 @@ def main() -> None:
         f"  vol_surge_ratio = {args.vol_surge_ratio}x\n"
         f"  max_ema_ext     = {args.max_ema_ext}%（{'停用' if args.max_ema_ext == 0 else '距EMA20最大延伸'}）\n"
         f"  pre_close_sec   = {args.pre_close_sec}s（{'收盤後5s' if args.pre_close_sec == 0 else f'收盤前{args.pre_close_sec}s評估'}）\n"
+        f"  enable_reverse  = {args.enable_reverse}"
+        + (f"  reverse TP=+{args.reverse_tp_pct}% SL=-{args.reverse_sl_pct}%" if args.enable_reverse else "") + "\n"
         f"  dry_run         = {args.dry_run}"
     )
 
@@ -202,6 +210,9 @@ def main() -> None:
         lock_gain_roi=args.lock_gain_pct / 100,
         lock_sl_pct=args.lock_sl_pct / 100,
         max_ema_ext=args.max_ema_ext / 100,
+        enable_reverse=args.enable_reverse,
+        reverse_tp_roi=args.reverse_tp_pct / 100,
+        reverse_sl_roi=args.reverse_sl_pct / 100,
         period=args.interval,
     )
 

@@ -77,6 +77,9 @@ class LongOiMomentumStrategy(BaseStrategy):
         lock_gain_roi:      float = _LOCK_GAIN_ROI,
         lock_sl_pct:        float = _LOCK_SL_PCT,
         max_ema_ext:        float = _MAX_EMA_EXT,
+        enable_reverse:     bool  = False,
+        reverse_tp_roi:     float = 0.20,
+        reverse_sl_roi:     float = 0.05,
         period:             str   = _PERIOD,
         data_provider:      BinanceFuturesData | None = None,
     ) -> None:
@@ -91,6 +94,9 @@ class LongOiMomentumStrategy(BaseStrategy):
         self._lock_gain_roi      = lock_gain_roi
         self._lock_sl_pct        = lock_sl_pct
         self._max_ema_ext        = max_ema_ext
+        self._enable_reverse     = enable_reverse
+        self._reverse_tp_roi     = reverse_tp_roi
+        self._reverse_sl_roi     = reverse_sl_roi
         self._period             = _PERIOD_MAP.get(period, "1h")
         self._data               = data_provider or BinanceFuturesData()
         self._entry_oi:  dict[str, float] = {}
@@ -221,9 +227,36 @@ class LongOiMomentumStrategy(BaseStrategy):
         logger.debug(f"[long_oi_momentum] Vol✓ 量比={ratio:.2f} ≥ {self._vol_surge_ratio}")
         return None
 
+    # ── 反向空單輔助 ──────────────────────────────────────────────────────────
+
+    def _to_reverse(self, close: float, original_reason: str) -> Signal:
+        """將出場信號轉換為反向空單信號"""
+        sl = round(close * (1 + self._reverse_sl_roi / self._leverage), 8)
+        tp = round(close * (1 - self._reverse_tp_roi / self._leverage), 8)
+        return Signal(
+            action="reverse_short",
+            stop_loss=sl,
+            take_profit=tp,
+            reason=(
+                f"{original_reason} → 反向空單"
+                f" TP={tp:.4f}(ROI+{self._reverse_tp_roi*100:.0f}%)"
+                f" SL={sl:.4f}(ROI-{self._reverse_sl_roi*100:.0f}%)"
+            ),
+        )
+
+    def _exit_or_reverse(self, close: float, reason: str) -> Signal:
+        """出場信號：enable_reverse=True 時改為反向空單，否則直接平倉"""
+        if self._enable_reverse:
+            return self._to_reverse(close, reason)
+        return Signal(action="close", reason=reason)
+
     # ── 出場 ──────────────────────────────────────────────────────────────────
 
     def _check_exit(self, snap: IndicatorSnapshot, pos: ActivePosition) -> Signal:
+        # 反向空單由交易所 TP/SL 管理，策略不介入
+        if pos.side == "SELL":
+            return Signal(action="hold", reason="反向空單由交易所 TP/SL 管理中")
+
         symbol = snap.symbol
         close  = snap.close
         gain   = (close - pos.entry_price) / pos.entry_price
@@ -232,17 +265,17 @@ class LongOiMomentumStrategy(BaseStrategy):
         # 硬止損（以 ROI% 計）
         if roi <= -self._sl_roi:
             self._clear_state(symbol)
-            return Signal(
-                action="close",
-                reason=f"硬止損 ROI={roi*100:.1f}%（≤-{self._sl_roi*100:.0f}%）price={close:.4f}",
+            return self._exit_or_reverse(
+                close,
+                f"硬止損 ROI={roi*100:.1f}%（≤-{self._sl_roi*100:.0f}%）price={close:.4f}",
             )
 
         # 固定止盈：ROI 達到門檻直接出場
         if roi >= self._tp_roi:
             self._clear_state(symbol)
-            return Signal(
-                action="close",
-                reason=f"達到目標獲利 ROI+{roi*100:.1f}%（≥{self._tp_roi*100:.0f}%），獲利了結",
+            return self._exit_or_reverse(
+                close,
+                f"達到目標獲利 ROI+{roi*100:.1f}%（≥{self._tp_roi*100:.0f}%），獲利了結",
             )
 
         # ROI 達到鎖定門檻後：SL 至少鎖定至 entry + lock_sl_pct（價格%）
@@ -271,12 +304,9 @@ class LongOiMomentumStrategy(BaseStrategy):
                 oi_drop = (peak_oi - curr_oi) / peak_oi
                 if oi_drop >= self._oi_exit_pct:
                     self._clear_state(symbol)
-                    return Signal(
-                        action="close",
-                        reason=(
-                            f"OI 從峰值下跌 {oi_drop*100:.1f}%"
-                            f"（>{self._oi_exit_pct*100:.0f}%），資金開始撤退"
-                        ),
+                    return self._exit_or_reverse(
+                        close,
+                        f"OI 從峰值下跌 {oi_drop*100:.1f}%（>{self._oi_exit_pct*100:.0f}%），資金開始撤退",
                     )
 
         # 移動止損（ROI 達門檻後啟動，距離以 ROI 換算回價格%）

@@ -583,6 +583,8 @@ class ServiceRunner:
             self._close_position(signal, active_pos, snap.close)
         elif signal.action == "trail_sl":
             self._update_trailing_sl(signal, snap, active_pos)
+        elif signal.action == "reverse_short":
+            self._reverse_to_short(signal, snap, active_pos, strategy_name)
 
     def _open_position(
         self, signal: Signal, snap: IndicatorSnapshot, strategy_name: str
@@ -929,6 +931,25 @@ class ServiceRunner:
 
         self._active_pos = None
         pos_delete(self._exchange.name, self._symbol)
+
+    def _reverse_to_short(
+        self,
+        signal: Signal,
+        snap: IndicatorSnapshot,
+        active_pos: ActivePosition | None,
+        strategy_name: str,
+    ) -> None:
+        """平多倉後立即開反向空單（SL/TP 由 signal 帶入）"""
+        close_signal = Signal(action="close", reason=signal.reason)
+        self._close_position(close_signal, active_pos, snap.close)
+        # 平倉後 _active_pos 已清空，直接送空單開倉
+        short_signal = Signal(
+            action="open_short",
+            stop_loss=signal.stop_loss,
+            take_profit=signal.take_profit,
+            reason=signal.reason,
+        )
+        self._open_position(short_signal, snap, strategy_name)
 
     def _fetch_actual_entry(
         self,
