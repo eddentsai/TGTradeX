@@ -587,7 +587,11 @@ class ServiceRunner:
             self._reverse_to_short(signal, snap, active_pos, strategy_name)
 
     def _open_position(
-        self, signal: Signal, snap: IndicatorSnapshot, strategy_name: str
+        self,
+        signal: Signal,
+        snap: IndicatorSnapshot,
+        strategy_name: str,
+        bypass_funding_check: bool = False,
     ) -> None:
         if self._active_pos is not None:
             logger.warning(f"[{self._symbol}] 已有持倉，忽略開倉信號")
@@ -601,19 +605,21 @@ class ServiceRunner:
             return
 
         # 資金費率過濾：多頭費率過高跳過做多；空頭費率過負跳過做空
-        fr = self._get_funding_rate_cached()
-        if signal.action == "open_long" and fr > _FUNDING_RATE_LONG_BLOCK:
-            logger.info(
-                f"[{self._symbol}] 資金費率過高 ({fr:.4f} > {_FUNDING_RATE_LONG_BLOCK})，"
-                f"跳過做多"
-            )
-            return
-        if signal.action == "open_short" and fr < -_FUNDING_RATE_LONG_BLOCK:
-            logger.info(
-                f"[{self._symbol}] 資金費率過負 ({fr:.4f} < -{_FUNDING_RATE_LONG_BLOCK})，"
-                f"跳過做空（空頭過度擁擠）"
-            )
-            return
+        # bypass_funding_check=True 時略過（用於反向空單：市場偏空正是做空時機）
+        if not bypass_funding_check:
+            fr = self._get_funding_rate_cached()
+            if signal.action == "open_long" and fr > _FUNDING_RATE_LONG_BLOCK:
+                logger.info(
+                    f"[{self._symbol}] 資金費率過高 ({fr:.4f} > {_FUNDING_RATE_LONG_BLOCK})，"
+                    f"跳過做多"
+                )
+                return
+            if signal.action == "open_short" and fr < -_FUNDING_RATE_LONG_BLOCK:
+                logger.info(
+                    f"[{self._symbol}] 資金費率過負 ({fr:.4f} < -{_FUNDING_RATE_LONG_BLOCK})，"
+                    f"跳過做空（空頭過度擁擠）"
+                )
+                return
 
         # 檢查全域持倉上限
         if self._max_positions > 0:
@@ -949,7 +955,8 @@ class ServiceRunner:
             take_profit=signal.take_profit,
             reason=signal.reason,
         )
-        self._open_position(short_signal, snap, strategy_name)
+        # 反向空單不檢查資金費率：市場偏空（費率偏負）正是做空的時機
+        self._open_position(short_signal, snap, strategy_name, bypass_funding_check=True)
 
     def _fetch_actual_entry(
         self,
