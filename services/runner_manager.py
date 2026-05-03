@@ -75,6 +75,8 @@ class RunnerManager:
         sl_roi: float = 0.0,
         confirm_interval: str | None = None,
         pre_close_sec: int = 0,
+        short_trail_trigger_usdt: float = 0.0,
+        short_trail_distance_usdt: float = 0.5,
     ) -> None:
         self._exchange = exchange
         self._scanner = scanner
@@ -89,8 +91,10 @@ class RunnerManager:
         self._trail_activate_roi = trail_activate_roi
         self._trail_distance_roi = trail_distance_roi
         self._sl_roi             = sl_roi
-        self._confirm_interval   = confirm_interval
-        self._pre_close_sec      = pre_close_sec
+        self._confirm_interval           = confirm_interval
+        self._pre_close_sec              = pre_close_sec
+        self._short_trail_trigger_usdt   = short_trail_trigger_usdt
+        self._short_trail_distance_usdt  = short_trail_distance_usdt
 
         if enable_ensemble and not self._ensemble_strategies:
             raise ValueError("enable_ensemble=True 時，ensemble_strategies 不可為空")
@@ -264,6 +268,8 @@ class RunnerManager:
             leverage=self._sizer.leverage,
             confirm_interval=self._confirm_interval,
             pre_close_sec=self._pre_close_sec,
+            short_trail_trigger_usdt=self._short_trail_trigger_usdt,
+            short_trail_distance_usdt=self._short_trail_distance_usdt,
         )
         thread = threading.Thread(
             target=runner.run,

@@ -130,6 +130,10 @@ def main() -> None:
                         help="SL 距清算價最低緩衝 %%（預設 12.0；小幣 mm_rate 較高故調低）")
     parser.add_argument("--pre-close-sec", type=int, default=60,
                         help="在 K 線收盤前幾秒評估進場（預設 60；0 = 收盤後 5s 評估）")
+    parser.add_argument("--short-trail-trigger", type=float, default=0.0,
+                        help="空單移動止損觸發門檻（USDT，不含手續費估算；預設 0 = 停用）")
+    parser.add_argument("--short-trail-distance", type=float, default=0.5,
+                        help="空單移動止損跟蹤距離（USDT；SL 保持在當前浮盈 − 此值的價格，預設 0.5）")
     parser.add_argument("--max-consecutive-losses", type=int, default=3)
     parser.add_argument("--max-daily-loss", type=float, default=10.0)
     parser.add_argument("--dry-run", action="store_true")
@@ -163,6 +167,8 @@ def main() -> None:
         f"  pre_close_sec   = {args.pre_close_sec}s（{'收盤後5s' if args.pre_close_sec == 0 else f'收盤前{args.pre_close_sec}s評估'}）\n"
         f"  enable_reverse  = {args.enable_reverse}"
         + (f"  reverse TP=+{args.reverse_tp_pct}% SL=-{args.reverse_sl_pct}%" if args.enable_reverse else "") + "\n"
+        f"  short_trail     = "
+        + (f"觸發≥{args.short_trail_trigger}U+手續費  跟蹤距離={args.short_trail_distance}U" if args.short_trail_trigger > 0 else "停用") + "\n"
         f"  dry_run         = {args.dry_run}"
     )
 
@@ -245,6 +251,8 @@ def main() -> None:
         sl_roi=args.sl_pct / 100,
         confirm_interval=args.confirm_period,
         pre_close_sec=args.pre_close_sec,
+        short_trail_trigger_usdt=args.short_trail_trigger,
+        short_trail_distance_usdt=args.short_trail_distance,
     )
 
     def _handle_signal(sig, _):

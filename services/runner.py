@@ -155,6 +155,8 @@ class ServiceRunner:
         price_monitor_interval: int = 60,
         confirm_interval: str | None = None,
         pre_close_sec: int = 0,
+        short_trail_trigger_usdt: float = 0.0,
+        short_trail_distance_usdt: float = 0.5,
     ) -> None:
         if sizer is None and fixed_qty is None:
             raise ValueError("必須提供 sizer 或 fixed_qty 其中之一")
@@ -179,8 +181,10 @@ class ServiceRunner:
         self._sl_roi                = sl_roi
         self._monitor_leverage      = leverage
         self._price_monitor_interval = price_monitor_interval
-        self._confirm_interval      = confirm_interval
-        self._pre_close_sec         = pre_close_sec
+        self._confirm_interval           = confirm_interval
+        self._pre_close_sec              = pre_close_sec
+        self._short_trail_trigger_usdt   = short_trail_trigger_usdt
+        self._short_trail_distance_usdt  = short_trail_distance_usdt
 
         # 資金費率快取（避免每根 K 線都呼叫 API）
         self._fr_cache: float = 0.0
@@ -223,17 +227,14 @@ class ServiceRunner:
             f"interval={self._interval} {qty_desc}"
         )
 
-        if self._trail_activate_roi > 0:
+        if self._trail_activate_roi > 0 or self._short_trail_trigger_usdt > 0:
             monitor_thread = threading.Thread(
                 target=self._price_monitor_loop,
                 name=f"price-monitor-{self._symbol}",
                 daemon=True,
             )
             monitor_thread.start()
-            logger.debug(
-                f"[{self._symbol}] 快速價格監控啟動"
-                f"（每 {self._price_monitor_interval}s，trail ROI≥{self._trail_activate_roi*100:.0f}%）"
-            )
+            logger.debug(f"[{self._symbol}] 快速價格監控啟動（每 {self._price_monitor_interval}s）")
 
         while not self._stop_event.is_set():
             try:
@@ -1074,6 +1075,7 @@ class ServiceRunner:
                 mark = self._exchange.get_mark_price(self._symbol)
                 if not self._monitor_hard_sl(mark):
                     self._monitor_update_trail(mark)
+                self._monitor_update_short_trail(mark)
             except Exception as e:
                 logger.debug(f"[{self._symbol}] 快速監控取價失敗: {e}")
 
@@ -1170,4 +1172,72 @@ class ServiceRunner:
             f"[{self._symbol}] [快速監控] 移動止損上移"
             f" SL {old_sl:.4f} → {new_sl:.4f}"
             f"  ROI+{roi*100:.1f}%  標記價={mark_price:.4f}"
+        )
+
+    def _monitor_update_short_trail(self, mark_price: float) -> None:
+        """空單移動止損：浮盈超過觸發門檻（含手續費估算）後，SL 持續跟蹤在當前浮盈 − distance_usdt。"""
+        with self._pos_lock:
+            pos = self._active_pos
+            if pos is None or pos.side != "SELL":
+                return
+            if self._short_trail_trigger_usdt <= 0:
+                return
+
+            qty = float(pos.qty)
+            if qty <= 0 or pos.entry_price <= 0:
+                return
+
+            profit_usdt = (pos.entry_price - mark_price) * qty
+
+            # 手續費估算：taker 0.05% × 開倉 + 平倉
+            fees_usdt = 0.0005 * 2 * (pos.entry_price * qty)
+            trigger = self._short_trail_trigger_usdt + fees_usdt
+
+            if profit_usdt < trigger:
+                return
+
+            # SL 跟蹤位置：標記價 + (distance_usdt / qty) → 確保觸發時仍有 distance_usdt 利潤
+            distance_price = self._short_trail_distance_usdt / qty
+            new_sl = round(mark_price + distance_price, 8)
+            old_sl = pos.stop_loss
+
+            # 只在新 SL 更低時更新（空單 SL 越低 = 鎖定更多利潤）
+            if new_sl >= old_sl:
+                return
+
+            new_tp = pos.take_profit
+
+            if self._dry_run:
+                logger.info(
+                    f"[DRY-RUN][快速監控] 空單移動止損"
+                    f" SL {old_sl:.4f} → {new_sl:.4f}"
+                    f"  浮盈={profit_usdt:.2f}U  標記價={mark_price:.4f}"
+                )
+                return
+
+            try:
+                self._exchange.cancel_all_orders(self._symbol)
+            except Exception as e:
+                logger.warning(f"[{self._symbol}] 空單移動止損：取消舊條件單失敗: {e}")
+
+            try:
+                self._exchange.place_sl_tp_orders(
+                    symbol=self._symbol,
+                    side=pos.side,
+                    qty=pos.qty,
+                    sl_price=new_sl,
+                    tp_price=new_tp,
+                    position_id=pos.position_id,
+                )
+            except Exception as e:
+                logger.warning(f"[{self._symbol}] 空單移動止損：重掛條件單失敗: {e}")
+                return
+
+            pos.stop_loss = new_sl
+            pos_save(self._exchange.name, self._symbol, pos)
+
+        logger.info(
+            f"[{self._symbol}] [快速監控] 空單移動止損"
+            f" SL {old_sl:.4f} → {new_sl:.4f}"
+            f"  浮盈={profit_usdt:.2f}U  標記價={mark_price:.4f}"
         )

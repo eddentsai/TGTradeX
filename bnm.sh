@@ -15,7 +15,8 @@ SERVICE_ARGS="--exchange binance --max-positions 4 \
     --leverage 5 --risk-pct 4.0 --sl-pct 32 --interval 1h --confirm-period 4h --scan-interval 900 --min-volume 20000000 --top-volatile 100 \
     --rsi-max 80 --min-sl-buffer 0 --max-ema-ext 8.0 --pre-close-sec 60 \
     --max-daily-loss 20 \
-    --enable-reverse --reverse-tp-pct 20 --reverse-sl-pct 5"
+    --enable-reverse --reverse-tp-pct 20 --reverse-sl-pct 5 \
+    --short-trail-trigger 1 --short-trail-distance 0.5"
 
 # ── 工具函式 ───────────────────────────────────────────────────────────────────
 
