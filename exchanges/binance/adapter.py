@@ -55,26 +55,32 @@ class BinanceExchange(BaseExchange):
             base_path=self._base_path,
         )
         self._client = DerivativesTradingUsdsFutures(config_rest_api=config)
+        self._tick_cache:           dict[str, float] = {}
+        self._qty_precision_cache:  dict[str, int]   = {}
+        self._filters_load_ok:      bool             = False
+        self._filters_failed_at:    float            = 0.0
 
     def _load_symbol_filters(self) -> None:
         """從 /fapi/v1/exchangeInfo 載入所有 symbol 的 tick_size 與 qty_precision。
-        失敗時設旗標，_FILTERS_RETRY_COOLDOWN 秒內不重試。"""
-        self._tick_cache: dict[str, float] = {}
-        self._qty_precision_cache: dict[str, int] = {}
+        成功時才覆蓋快取；失敗時保留舊快取，設旗標，_FILTERS_RETRY_COOLDOWN 秒內不重試。"""
         try:
             url  = f"{self._base_path}/fapi/v1/exchangeInfo"
             resp = _requests.get(url, timeout=10)
             if not resp.ok:
                 raise RuntimeError(f"HTTP {resp.status_code}")
+            new_tick_cache: dict[str, float] = {}
+            new_qty_cache:  dict[str, int]   = {}
             for s in resp.json().get("symbols", []):
                 sym = s.get("symbol", "")
-                self._qty_precision_cache[sym] = int(s.get("quantityPrecision", 3))
+                new_qty_cache[sym] = int(s.get("quantityPrecision", 3))
                 for f in s.get("filters", []):
                     if f.get("filterType") == "PRICE_FILTER":
-                        self._tick_cache[sym] = float(f.get("tickSize", "0.01"))
+                        new_tick_cache[sym] = float(f.get("tickSize", "0.01"))
                         break
-            self._filters_load_ok   = True
-            self._filters_failed_at = 0.0
+            self._tick_cache          = new_tick_cache
+            self._qty_precision_cache = new_qty_cache
+            self._filters_load_ok     = True
+            self._filters_failed_at   = 0.0
         except Exception as e:
             self._filters_load_ok   = False
             self._filters_failed_at = time.time()
