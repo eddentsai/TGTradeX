@@ -183,11 +183,27 @@ class LongOiMomentumStrategy(BaseStrategy):
         if vol_check is not None:
             return vol_check
 
-        # ── 通過，發出開多信號 ────────────────────────────────────────────────
+        # ── 通過，發出信號 ────────────────────────────────────────────────────
         close = snap.close
-        sl    = round(close * (1 - self._sl_roi / self._leverage), 8)
-        tp    = round(close * (1 + self._tp_roi / self._leverage), 8)
 
+        # enable_reverse=True：OI 動能視為「即將到頂」→ 直接開空
+        if self._enable_reverse:
+            sl = round(close * (1 + self._reverse_sl_roi / self._leverage), 8)
+            tp = round(close * (1 - self._reverse_tp_roi / self._leverage), 8)
+            return Signal(
+                action="open_short",
+                stop_loss=sl,
+                take_profit=tp,
+                reason=(
+                    f"OI動能反轉空單: EMA20={snap.ema20:.4f}"
+                    + (f" RSI={snap.rsi:.1f}" if snap.rsi is not None else "")
+                    + f" SL={sl:.4f}（ROI-{self._reverse_sl_roi*100:.0f}%）"
+                    + f" TP={tp:.4f}（ROI+{self._reverse_tp_roi*100:.0f}%）"
+                ),
+            )
+
+        sl = round(close * (1 - self._sl_roi / self._leverage), 8)
+        tp = round(close * (1 + self._tp_roi / self._leverage), 8)
         return Signal(
             action="open_long",
             stop_loss=sl,
@@ -245,9 +261,6 @@ class LongOiMomentumStrategy(BaseStrategy):
         )
 
     def _exit_or_reverse(self, close: float, reason: str) -> Signal:
-        """出場信號：enable_reverse=True 時改為反向空單，否則直接平倉"""
-        if self._enable_reverse:
-            return self._to_reverse(close, reason)
         return Signal(action="close", reason=reason)
 
     # ── 出場 ──────────────────────────────────────────────────────────────────

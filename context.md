@@ -6,13 +6,14 @@
 
 ## 專案目標
 
-提供四種期貨交易自動化模式：
+提供五種期貨交易自動化模式：
 
-1. **OI 背離做多服務**（`run_oi_long.py`）：波動性掃描 + OI 48h 背離篩選，只做多，結構性出場（bn.sh / bu.sh 使用）
-2. **Ensemble 多策略掃描服務**（`run_mix_strategies.py`）：自動掃描高流動性山寨幣，三策略多數決開倉，雙向交易
-3. **自動掃描交易服務**（`run_auto.py`）：自動掃描並依市場狀態自動切換策略
-4. **單一幣種自動服務**（`run_service.py`）：固定監控指定幣種，自動識別市場狀態、切換策略
-5. **Telegram Bot**（`main.py`）：接收使用者文字指令，手動控制開平倉
+1. **OI 動能反轉空單服務**（`run_oi_momentum.py`）：波動性掃描 + OI 8h 動能篩選 + 技術確認，條件達成即直接開空，交易所 SL/TP 管理出場（bnm.sh / bum.sh 使用）
+2. **OI 背離做多服務**（`run_oi_long.py`）：波動性掃描 + OI 48h 背離篩選，只做多，結構性出場（bn.sh / bu.sh 使用）
+3. **Ensemble 多策略掃描服務**（`run_mix_strategies.py`）：自動掃描高流動性山寨幣，三策略多數決開倉，雙向交易
+4. **自動掃描交易服務**（`run_auto.py`）：自動掃描並依市場狀態自動切換策略
+5. **單一幣種自動服務**（`run_service.py`）：固定監控指定幣種，自動識別市場狀態、切換策略
+6. **Telegram Bot**（`main.py`）：接收使用者文字指令，手動控制開平倉
 
 所有服務共用 `exchanges/` 層，互不干擾，可同時運行。
 
@@ -100,6 +101,23 @@ scanner = SymbolScanner(
 )
 ```
 
+**`services/oi_momentum.py`**
+
+`OiMomentumFilter` 從候選幣種中篩選出 OI 與價格短期同步上升的動能幣種，用於 `run_oi_momentum.py`。
+
+篩選流程：
+1. **BTC 趨勢前置過濾**：BTC 收盤低於 EMA20(1h) 時，回傳「僅保留已持倉幣種」，不開新倉（市場系統性偏空）
+2. 依序對每個候選幣種評估下列五個條件（已持倉幣種無條件保留）：
+   - OI 8h 增加 > `oi_change_min`（預設 5%）
+   - 價格 8h 增加 > `price_change_min`（預設 2%）
+   - 近 3 根 K 線合計成交額 > `min_recent_vol`（預設 200 萬 USDT）
+   - 近 2h 價格跌幅不超過 `min_recent_price_change`（預設 -2%；允許小幅回落）
+   - 當前收盤距 8h 最高收盤回落不超過 `max_peak_retrace`（預設 5%）
+
+`_get_momentum(symbol)` 回傳 `(oi_change_8h, price_change_8h, recent_vol_usdt, price_change_2h, peak_retrace)`；資料來源為 `BinanceFuturesData.get_oi_history(period="1h", limit=9)` + `exchange.get_klines(symbol, "1h", limit=9)`。
+
+---
+
 **`services/oi_divergence.py`**
 
 `OiDivergenceFilter` 從候選幣種中篩選出 OI 大幅累積但價格尚未反應的幣種。
@@ -123,6 +141,10 @@ scanner = SymbolScanner(
 - 維護 `_invalid_symbols` 永久黑名單，寫入來源：
   - `get_qty_precision` 失敗（交易所不存在該合約）→ 直接加入
   - runner 回報 `[710002]` 不支援 API 交易 → 透過 `on_symbol_banned` 回呼加入
+
+新增建構參數（傳遞至每個 `ServiceRunner`）：
+- `confirm_interval: str | None`：多週期確認週期（例如 `"4h"`）；`None` = 停用
+- `pre_close_sec: int`：在 K 線收盤前幾秒喚醒評估（`0` = 收盤後 5s）
 
 **Redis 黑名單持久化**：
 - 建構時傳入 `redis_url`（預設 `redis://localhost:6379/0`，可透過環境變數 `REDIS_URL` 覆寫）
@@ -151,10 +173,28 @@ redis-cli srem "tgtraderx:invalid_symbols:bitunix" ZECUSDT
 - `dry_run=True` 時只記錄，不呼叫 `place_order`
 - `stop()` 透過 `threading.Event` 通知主迴圈在當前週期後退出
 
-開倉流程（`_open_position`）重點：
+**新增建構參數：**
+- `confirm_interval: str | None`：多週期確認週期（例如 `"4h"`）；`_run_cycle` 中額外抓取此週期 K 線並計算 `confirm_snap`，附加到主週期的 `snap.confirm_snap`，策略可讀取
+- `pre_close_sec: int`（預設 `0`）：`> 0` 時，每週期喚醒點提前至 K 線收盤前 `pre_close_sec` 秒（進場價接近當根收盤而非下一根開盤）；`0` = 收盤後 5s 喚醒
+
+**`_sleep_until_next_candle()` 行為：**
+- `pre_close_sec > 0`：計算下一個 K 線邊界後退 `pre_close_sec` 秒為喚醒時間；若目標已過（本週期執行時間太長），自動跳至下下根 K 線
+- `pre_close_sec == 0`：收盤後 5s 喚醒（評估剛收盤的完整 K 線）
+- 採分段睡眠（每段 ≤10s），可及時響應 `stop()` 信號
+
+**開倉流程（`_open_position`）重點：**
 1. 若 `sizer` 可用，開倉前先呼叫 `exchange.set_leverage(symbol, leverage)` 強制對齊槓桿
 2. `place_order` 只送開倉單（SL/TP 已在 adapter 層剝離）
 3. 呼叫 `_fetch_actual_entry` 取得實際成交價與 `position_id`，再以實際價重算 SL/TP，最後呼叫 `place_sl_tp_orders` 補掛
+4. `bypass_funding_check: bool = False`：`True` 時略過資金費率封鎖（用於反向空單，市場偏空費率偏負正是做空時機）
+
+**資金費率封鎖規則（`_open_position` 中）：**
+- `open_long` + 費率 > `0.0005`（0.05%）→ 跳過（多頭過度擁擠）
+- `open_short` + 費率 < `-0.0005` → 跳過（空頭過度擁擠）
+- 反向空單（`bypass_funding_check=True`）略過上述兩條
+
+**`_reverse_to_short(signal, snap, active_pos, strategy_name)`：**
+先呼叫 `_close_position` 平多倉，再呼叫 `_open_position(..., bypass_funding_check=True)` 開空單。目前主要由 `signal.action == "reverse_short"` 觸發（`_execute` 路由）；在 `enable_reverse=True` 模式下進場直接發出 `open_short` 信號，此路徑較少使用。
 
 `_fetch_actual_entry` 實作重試邏輯：最多 4 次、每次間隔 0.5s（共最多 2s），解決市價單填充後倉位尚未出現在 API 的時序問題；所有嘗試失敗才 fallback 使用信號價。
 
@@ -240,6 +280,7 @@ required_margin = position_value ÷ leverage
 
 | 策略 | 對應市場 | 入場條件 | 出場條件 |
 |------|---------|---------|---------|
+| `LongOiMomentumStrategy` | 獨立運行 | OI 動能預篩後：收盤>EMA20 + EMA20延伸≤門檻 + RSI<rsi_max + 高週期確認 + 量突破 | `enable_reverse=False`：硬止損/固定TP/OI峰值跌/移動止損；`enable_reverse=True`：SELL 倉由交易所 SL/TP 管理 |
 | `FibonacciStrategy` | UPTREND | EMA20 > EMA50 + 回調至 Fib 0.618/0.5/0.382 + 錘子線確認 | 前高（TP）/ Fib 0.786 下方（SL）|
 | `VwapPocStrategy` | RANGING | POC > VWAP + 跌至 VWAP-1.5σ + RSI < 40 + R:R ≥ 1.5 | VWAP 提前出場 / POC 全倉出場 / SL=VWAP-2.5σ |
 | `DipVolumeStrategy` | HIGH_VOLATILITY | 近 5 根跌幅 > 3% + 量比 > 3x + 止跌確認（無新低+下影線）| 反彈至 EMA20 / TP +3% / SL -1.5% / 時間止損 10 根 |
@@ -247,6 +288,23 @@ required_margin = position_value ÷ leverage
 | `EnsembleStrategy` | 可選模式 | ≥ 2 個策略同時確認開倉；SL 取最高，TP 取最低（最保守）| 任一策略觸發出場即出場 |
 | `OiLsRatioStrategy` | 獨立運行 | OI 上升 ≥ 1.5% + 多空比朝擠壓方向變動 ≥ 3% + 單調性 ≥ 60% + RSI 過濾 + 24h 漲跌幅過濾 | SL/TP/移動止損；SL 後 2h 冷卻 |
 | `LongOnlyOiStrategy` | 獨立運行 | OI 背離預篩後：多空比近 5 期下降 >3%（空方累積）+ 收盤 > EMA20 + RSI < 70 | 硬止損 -20%；OI 從峰值跌 >5%；多空比較進場漲 >10%；無固定 TP |
+
+`LongOiMomentumStrategy` 有兩種模式，均用於 `run_oi_momentum.py`（bnm.sh / bum.sh）：
+
+**`enable_reverse=True`（目前主力模式）：OI 動能反轉空單**
+- 進場條件全部通過 → 直接發出 `open_short` 信號（不先做多）
+- SL = 進場價 × (1 + reverse_sl_roi ÷ leverage)；TP = 進場價 × (1 − reverse_tp_roi ÷ leverage)
+- SELL 倉進場後一律回傳 `hold`，由交易所 SL/TP 管理全部出場
+- `_to_reverse()` / `_exit_or_reverse()` 輔助方法仍保留，但在此模式下 `_exit_or_reverse` 永遠回傳 `close`
+
+**`enable_reverse=False`（做多模式）：** 進場 `open_long`；出場依硬止損/固定 TP/OI 峰值跌 >5%/移動止損結構性決定。
+
+進場過濾（兩種模式共用）：
+1. 收盤 > EMA20（主週期）
+2. 收盤距 EMA20 延伸 ≤ `max_ema_ext`（主週期）；高週期門檻 = `max_ema_ext × 1.5`
+3. RSI < `rsi_max`（主週期）
+4. `snap.confirm_snap` 存在時：高週期 close > EMA20 + RSI < rsi_max + 延伸 ≤ 1.5× 門檻
+5. 近 3 根均量 > 前 10 根均量 × `vol_surge_ratio`
 
 `OiLsRatioStrategy`：Binance 公開 API 抓 OI + 多空比，雙向交易，用於 `run_mix_strategies.py`。
 
@@ -313,6 +371,35 @@ TG Bot 的應用層，協調 bot 和 exchanges 之間的流程。
 ---
 
 ## 資料流
+
+### OI 動能反轉空單模式（`run_oi_momentum.py`）
+
+```
+run_oi_momentum.py
+    │ 組裝 trade_exchange + scan_exchange(Binance) + OiMomentumScanner + sizer + manager
+    ▼
+RunnerManager.run() — 每 scan_interval 秒掃描一次
+    │
+    ├─ _OiMomentumScanner.scan()
+    │       ├─ SymbolScanner.scan()        按 24h 振幅排序，取前 top_volatile 名
+    │       └─ OiMomentumFilter.filter()
+    │               ├─ BTC EMA20(1h) 前置檢查（偏空則跳過掃描）
+    │               └─ OI 8h > +5% 且 價格 8h > +2%（+ 流動性/動能/回落過濾）
+    └─ 為通過篩選的幣種啟動 ServiceRunner 執行緒
+            │
+            ▼  每根 K 線收盤前 60s 喚醒（pre_close_sec=60）
+        ServiceRunner._run_cycle()
+            ├─ exchange.get_klines(主週期)
+            ├─ compute_indicators(主週期) → snap
+            ├─ exchange.get_klines(confirm_interval)  → snap.confirm_snap
+            ├─ LongOiMomentumStrategy.on_candle()
+            │       無持倉：EMA20+延伸過濾+RSI+高週期確認+量突破
+            │           → open_short（enable_reverse=True）
+            │       SELL 持倉：hold（交易所 SL/TP 管理）
+            └─ exchange.place_order(SELL) + place_sl_tp_orders()
+```
+
+---
 
 ### OI 背離做多模式（`run_oi_long.py`）
 
@@ -448,3 +535,4 @@ sudo systemctl enable --now redis-server
 - **單一帳戶**：每個交易所目前只支援一組 API key，未來可在 adapter 層擴充多帳戶。
 - **下降趨勢不做空**：`DOWNTREND` 目前對應 `ConservativeStrategy`，尚未實作空頭的趨勢跟隨。
 - **Bitunix TP 為限價單**：TP 使用 `reduceOnly` 限價單進委託簿（maker 費率），若快速跳空可能未成交；SL 才是條件市價單。
+- **`run_oi_momentum.py` 啟動 log 過時**：module-level docstring 及啟動 log 仍描述「做多出場邏輯」，未反映 `enable_reverse=True` 直接開空的現況；日後重構時一併更新。
