@@ -20,6 +20,7 @@ from services.position_store import load as pos_load
 from services.position_store import save as pos_save
 from services.notifier import TelegramNotifier
 from services.risk_guard import RiskGuard
+from services.strategies.conservative import ConservativeStrategy
 from services.trade_journal import TradeJournal
 from services.strategies.base import ActivePosition, BaseStrategy, Signal
 from services.strategies.dip_volume import DipVolumeStrategy
@@ -197,7 +198,7 @@ class ServiceRunner:
         # 自動切換模式的策略映射（_fixed_strategy 不為 None 時不使用）
         self._strategies: dict[MarketState, BaseStrategy] = {
             MarketState.UPTREND:         FibonacciStrategy(),
-            MarketState.DOWNTREND:       FibonacciStrategy(),
+            MarketState.DOWNTREND:       ConservativeStrategy(),
             MarketState.RANGING:         VwapPocStrategy(),
             MarketState.HIGH_VOLATILITY: DipVolumeStrategy(),
         }
@@ -423,7 +424,9 @@ class ServiceRunner:
             return active_pos
 
         # ── 策略已切換 ────────────────────────────────────────────────────────
-        is_profitable = snap.close > active_pos.entry_price
+        is_profitable = snap.close < active_pos.entry_price
+        if active_pos.side == "BUY":
+            is_profitable = snap.close > active_pos.entry_price           
 
         if is_profitable:
             # 止損移到保本：鎖住不虧，讓新策略繼續管理出場
@@ -544,6 +547,13 @@ class ServiceRunner:
             except Exception as e:
                 logger.error(f"[{self._symbol}] 補掛 SL/TP 失敗，倉位暫無保護: {e}")
         else:
+            # 同步交易所 qty（部分平倉後快取可能過時）
+            exchange_qty = str(pos_dict.get("qty", "") or "")
+            if exchange_qty and exchange_qty != str(self._active_pos.qty):
+                logger.info(f"[{self._symbol}] qty 同步 {self._active_pos.qty} → {exchange_qty}")
+                self._active_pos.qty = exchange_qty
+                pos_save(self._exchange.name, self._symbol, self._active_pos)
+
             if not self._active_pos.position_id:
                 self._active_pos.position_id = pos_dict.get("positionId", "")
                 if self._active_pos.position_id:

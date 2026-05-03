@@ -21,6 +21,8 @@ from typing import Any
 logger = logging.getLogger(__name__)
 from urllib.parse import urlencode
 
+_FILTERS_RETRY_COOLDOWN = 60  # 快取載入失敗後的重試冷卻時間（秒）
+
 import requests as _requests
 from binance_common.configuration import ConfigurationRestAPI
 from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (
@@ -55,29 +57,52 @@ class BinanceExchange(BaseExchange):
         self._client = DerivativesTradingUsdsFutures(config_rest_api=config)
 
     def _load_symbol_filters(self) -> None:
-        """
-        一次性從 /fapi/v1/exchangeInfo 抓所有 symbol 的
-        tick_size（PRICE_FILTER）與 qty_step（LOT_SIZE），存入快取。
-        """
+        """從 /fapi/v1/exchangeInfo 載入所有 symbol 的 tick_size 與 qty_precision。
+        失敗時設旗標，_FILTERS_RETRY_COOLDOWN 秒內不重試。"""
         self._tick_cache: dict[str, float] = {}
         self._qty_precision_cache: dict[str, int] = {}
-        url  = f"{self._base_path}/fapi/v1/exchangeInfo"
-        resp = _requests.get(url, timeout=10)
-        if not resp.ok:
+        try:
+            url  = f"{self._base_path}/fapi/v1/exchangeInfo"
+            resp = _requests.get(url, timeout=10)
+            if not resp.ok:
+                raise RuntimeError(f"HTTP {resp.status_code}")
+            for s in resp.json().get("symbols", []):
+                sym = s.get("symbol", "")
+                self._qty_precision_cache[sym] = int(s.get("quantityPrecision", 3))
+                for f in s.get("filters", []):
+                    if f.get("filterType") == "PRICE_FILTER":
+                        self._tick_cache[sym] = float(f.get("tickSize", "0.01"))
+                        break
+            self._filters_load_ok   = True
+            self._filters_failed_at = 0.0
+        except Exception as e:
+            self._filters_load_ok   = False
+            self._filters_failed_at = time.time()
+            logger.warning(
+                f"[BinanceExchange] 載入 symbol filters 失敗，"
+                f"{_FILTERS_RETRY_COOLDOWN}s 後可重試: {e}"
+            )
+
+    def _ensure_filters(self) -> None:
+        """確保 tick / qty-precision 快取已載入；失敗時 _FILTERS_RETRY_COOLDOWN 秒內不重試。"""
+        if getattr(self, "_filters_load_ok", False):
             return
-        for s in resp.json().get("symbols", []):
-            sym = s.get("symbol", "")
-            self._qty_precision_cache[sym] = int(s.get("quantityPrecision", 3))
-            for f in s.get("filters", []):
-                if f.get("filterType") == "PRICE_FILTER":
-                    self._tick_cache[sym] = float(f.get("tickSize", "0.01"))
-                    break
+        failed_at = getattr(self, "_filters_failed_at", 0.0)
+        if failed_at and time.time() - failed_at < _FILTERS_RETRY_COOLDOWN:
+            return
+        self._load_symbol_filters()
 
     def _tick_size(self, symbol: str) -> float:
         """回傳指定交易對的最小報價單位（tick size），有快取。"""
-        if not hasattr(self, "_tick_cache"):
-            self._load_symbol_filters()
+        self._ensure_filters()
         return self._tick_cache.get(symbol, 0.01)
+
+    @staticmethod
+    def _decimals_from_tick(tick: float) -> int:
+        """從 tick size 推導價格小數位數。tick <= 0 回傳保守預設 2。"""
+        if tick <= 0:
+            return 2
+        return len(f"{tick:.10f}".rstrip("0").split(".")[-1])
 
     def _align_price(self, price: float, symbol: str) -> float:
         """將價格對齊到交易所要求的 tick size，避免 -4014 錯誤。"""
@@ -85,9 +110,7 @@ class BinanceExchange(BaseExchange):
         if tick <= 0:
             return price
         aligned = round(round(price / tick) * tick, 10)
-        # 去除浮點殘差：只保留 tick 的有效小數位數
-        decimals = len(f"{tick:.10f}".rstrip("0").split(".")[-1])
-        return round(aligned, decimals)
+        return round(aligned, self._decimals_from_tick(tick))
 
     def _signed_request(self, method: str, path: str, params: dict) -> dict:
         """直接送簽名 REST 請求（用於 SDK 不支援的參數）"""
@@ -200,7 +223,7 @@ class BinanceExchange(BaseExchange):
         }
 
         if order_type == "LIMIT":
-            kwargs["price"]         = float(payload["price"])
+            kwargs["price"]         = self._align_price(float(payload["price"]), symbol)
             kwargs["time_in_force"] = _map_effect(payload.get("effect", "GTC"))
 
         resp   = self._client.rest_api.new_order(**kwargs)
@@ -213,39 +236,7 @@ class BinanceExchange(BaseExchange):
             "_raw":    data,
         }
 
-        # ── 開倉後掛交易所 SL/TP 條件單 ──────────────────────────────────────
-        # 注意：SL/TP 掛單失敗只記警告，不拋例外，確保倉位快取一定能被存下來
-        if trade_side == "OPEN":
-            close_side = NewAlgoOrderSideEnum("SELL" if payload["side"] == "BUY" else "BUY")
-            sl_price   = payload.get("slPrice")
-            tp_price   = payload.get("tpPrice")
-            if sl_price:
-                try:
-                    self._client.rest_api.new_algo_order(
-                        algo_type="CONDITIONAL",
-                        symbol=symbol,
-                        side=close_side,
-                        type="STOP_MARKET",
-                        trigger_price=self._align_price(float(sl_price), symbol),
-                        working_type=NewAlgoOrderWorkingTypeEnum.MARK_PRICE,
-                        close_position="true",
-                    )
-                except Exception as e:
-                    logger.warning(f"[{symbol}] SL 條件單掛單失敗（倉位已建立）: {e}")
-            if tp_price:
-                try:
-                    self._client.rest_api.new_order(
-                        symbol=symbol,
-                        side=NewOrderSideEnum("SELL" if payload["side"] == "BUY" else "BUY"),
-                        type="LIMIT",
-                        quantity=qty,
-                        price=self._align_price(float(tp_price), symbol),
-                        time_in_force="GTC",
-                        reduce_only="true",
-                    )
-                except Exception as e:
-                    logger.warning(f"[{symbol}] TP 限價單掛單失敗（倉位已建立）: {e}")
-
+        # SL/TP 由 runner.py 在取得實際成交價後呼叫 place_sl_tp_orders() 補掛
         return result
 
     def cancel_order(self, order_id: str, symbol: str) -> dict[str, Any]:
@@ -354,18 +345,23 @@ class BinanceExchange(BaseExchange):
 
     def get_qty_precision(self, symbol: str) -> int:
         """從快取取得數量精度（quantityPrecision 欄位）"""
-        if not hasattr(self, "_qty_precision_cache"):
-            self._load_symbol_filters()
+        self._ensure_filters()
         return self._qty_precision_cache.get(symbol, 3)
 
     def get_price_precision(self, symbol: str) -> int:
-        """從 Binance 合約規格取得價格精度（price_precision 欄位，保留向下相容）"""
+        """優先從 tickSize 快取推導小數位數，避免重複呼叫 exchange_information()；
+        symbol 不在 tick cache 時 fallback 至全量 API。"""
+        self._ensure_filters()
+        tick = self._tick_cache.get(symbol)
+        if tick and tick > 0:
+            return self._decimals_from_tick(tick)
+        # fallback：symbol 不在 tick cache，打全量 API
         resp = self._client.rest_api.exchange_information()
         data = resp.data() if callable(resp.data) else resp.data
         for s in getattr(data, "symbols", []):
             if getattr(s, "symbol", "") == symbol:
                 return int(getattr(s, "price_precision", 2))
-        return 2  # 預設 2 位小數
+        return 2
 
     def get_funding_rate(self, symbol: str) -> float:
         """取得指定交易對的當前資金費率（十進位小數，例如 0.0001 = 0.01%）"""
