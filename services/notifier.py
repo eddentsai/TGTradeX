@@ -104,6 +104,29 @@ class TelegramNotifier:
             f"今日不再開新倉，次日 UTC 00:00 自動恢復。"
         )
 
+    def notify_funding_short(
+        self,
+        symbol: str,
+        funding_rate_pct: float,
+        qty: str,
+        entry_price: float,
+        tp_price: float,
+        sl_price: float,
+        order_id: str,
+        ack_delay_ms: int,
+    ) -> None:
+        tp_pct = abs(entry_price - tp_price) / entry_price * 100 if entry_price > 0 else 0.0
+        sl_pct = abs(sl_price - entry_price) / entry_price * 100 if entry_price > 0 else 0.0
+        self.send(
+            f"🟢 <b>資金費率空單</b>  {symbol}\n"
+            f"費率: {funding_rate_pct:.4f}%\n"
+            f"進場參考: {entry_price:.4f}\n"
+            f"止盈: {tp_price:.4f}  (-{tp_pct:.2f}%)\n"
+            f"止損: {sl_price:.4f}  (+{sl_pct:.2f}%)\n"
+            f"數量: {qty}  延遲: {ack_delay_ms}ms\n"
+            f"訂單 ID: {order_id}"
+        )
+
     def notify_start(self, exchange: str, mode: str, interval: str) -> None:
         self.send(
             f"🚀 <b>TGTradeX 啟動</b>\n"

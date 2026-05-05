@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
 from dotenv import load_dotenv
 
+from config import settings
 from exchanges.binance.adapter import BinanceExchange
 from services.log_handler import setup_logging
+from services.notifier import TelegramNotifier
 
 
 # 載入 .env
@@ -87,8 +87,8 @@ def calc_order_qty(
 def run() -> None:
     logger = logging.getLogger(__name__)
 
-    api_key = os.getenv("BINANCE_API_KEY", "").strip()
-    secret_key = os.getenv("BINANCE_SECRET_KEY", "").strip()
+    api_key = settings.BINANCE_API_KEY.strip()
+    secret_key = settings.BINANCE_SECRET_KEY.strip()
     if not api_key or not secret_key:
         raise RuntimeError("Missing env: BINANCE_API_KEY / BINANCE_SECRET_KEY")
 
@@ -97,6 +97,10 @@ def run() -> None:
         secret_key=secret_key,
         testnet=USE_TESTNET,
     )
+
+    notifier: TelegramNotifier | None = None
+    if settings.TG_BOT_TOKEN and settings.TG_CHAT_ID:
+        notifier = TelegramNotifier(settings.TG_BOT_TOKEN, settings.TG_CHAT_ID)
 
     logger.info("Funding watcher started (TZ=Asia/Taipei)")
     logger.info(
@@ -236,6 +240,18 @@ def run() -> None:
                 f"[RISK_ORDERS] symbol={symbol} | qty={qty} | "
                 f"tp={tp_price} | sl={sl_price} | based_on=price_5958({price_5958})"
             )
+
+            if notifier:
+                notifier.notify_funding_short(
+                    symbol=symbol,
+                    funding_rate_pct=target["fundingRatePct"],
+                    qty=str(qty),
+                    entry_price=price_5958,
+                    tp_price=tp_price,
+                    sl_price=sl_price,
+                    order_id=str(order_id),
+                    ack_delay_ms=ack_delay,
+                )
 
             positions = ex.get_pending_positions(symbol=symbol)
             logger.info(f"[POSITION_SNAPSHOT] symbol={symbol} | rows={len(positions)} | data={positions}")
