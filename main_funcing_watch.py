@@ -179,8 +179,6 @@ async def _ws_cycle(
             )
             return
 
-        tp_price, sl_price = calc_short_tp_sl(price_5958, current_rate)
-
         # ── 4. 等到 HH:00:00 ─────────────────────────────────────────────────
         sec = (t00 - now_tpe()).total_seconds()
         if sec > 0:
@@ -230,6 +228,7 @@ async def _ws_cycle(
             avg_price = float(getattr(result, "avg_price", None) or price_5958)
             executed_qty = str(getattr(result, "executed_qty", None) or qty)
             fill_ts = getattr(result, "update_time", None)
+            tp_price, sl_price = calc_short_tp_sl(avg_price, current_rate)
 
             logger.info(
                 f"[WS_ORDER_FILL] ts={ack_ts} ({fmt_ms(ack_ts)}) | ack_delay_ms={ack_delay} | "
