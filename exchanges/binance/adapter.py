@@ -67,7 +67,10 @@ class BinanceExchange(BaseExchange):
             url  = f"{self._base_path}/fapi/v1/exchangeInfo"
             resp = _requests.get(url, timeout=10)
             if not resp.ok:
-                raise RuntimeError(f"HTTP {resp.status_code}")
+                self._filters_load_ok = False
+                self._filters_failed_at = time.time()
+                logger.warning(f"Binance exchangeInfo failed: {resp.status_code} {resp.text}")
+                return
             new_tick_cache: dict[str, float] = {}
             new_qty_cache:  dict[str, int]   = {}
             for s in resp.json().get("symbols", []):
@@ -120,8 +123,9 @@ class BinanceExchange(BaseExchange):
 
     def _signed_request(self, method: str, path: str, params: dict) -> dict:
         """直接送簽名 REST 請求（用於 SDK 不支援的參數）"""
-        params["timestamp"] = int(time.time() * 1000)
-        query = urlencode(params)
+        req_params = dict(params)
+        req_params["timestamp"] = int(time.time() * 1000)
+        query = urlencode(req_params)
         sig   = hmac.new(
             self._secret_key.encode(), query.encode(), hashlib.sha256
         ).hexdigest()
@@ -132,9 +136,7 @@ class BinanceExchange(BaseExchange):
             timeout=10,
         )
         if not resp.ok:
-            raise RuntimeError(
-                f"Binance API {resp.status_code}: {resp.text}"
-            )
+            raise RuntimeError(f"Binance Signed request failed: {resp.status_code} {resp.text}")
         return resp.json()
 
     @property
@@ -213,34 +215,38 @@ class BinanceExchange(BaseExchange):
 
         Binance 不需要 positionId，平倉用 reduce_only="true"。
         """
-        symbol     = payload["symbol"]
-        side       = NewOrderSideEnum(payload["side"])
-        order_type = payload["orderType"]
-        qty        = float(payload["qty"])
-        trade_side = payload.get("tradeSide", "OPEN")
-        reduce_only = "true" if trade_side == "CLOSE" else "false"
+        try:
+            symbol     = payload["symbol"]
+            side       = NewOrderSideEnum(payload["side"])
+            order_type = payload["orderType"]
+            qty        = float(payload["qty"])
+            trade_side = payload.get("tradeSide", "OPEN")
+            reduce_only = "true" if trade_side == "CLOSE" else "false"
 
-        kwargs: dict[str, Any] = {
-            "symbol":      symbol,
-            "side":        side,
-            "type":        order_type,
-            "quantity":    qty,
-            "reduce_only": reduce_only,
-        }
+            kwargs: dict[str, Any] = {
+                "symbol":      symbol,
+                "side":        side,
+                "type":        order_type,
+                "quantity":    qty,
+                "reduce_only": reduce_only,
+            }
 
-        if order_type == "LIMIT":
-            kwargs["price"]         = self._align_price(float(payload["price"]), symbol)
-            kwargs["time_in_force"] = _map_effect(payload.get("effect", "GTC"))
+            if order_type == "LIMIT":
+                kwargs["price"]         = self._align_price(float(payload["price"]), symbol)
+                kwargs["time_in_force"] = _map_effect(payload.get("effect", "GTC"))
 
-        resp   = self._client.rest_api.new_order(**kwargs)
-        data   = resp.data() if callable(resp.data) else resp.data
-        result = {
-            "orderId": str(getattr(data, "order_id", "") or ""),
-            "symbol":  str(getattr(data, "symbol", "") or ""),
-            "side":    str(getattr(data, "side", "") or ""),
-            "status":  str(getattr(data, "status", "") or ""),
-            "_raw":    data,
-        }
+            resp   = self._client.rest_api.new_order(**kwargs)
+            data   = resp.data() if callable(resp.data) else resp.data
+            result = {
+                "orderId": str(getattr(data, "order_id", "") or ""),
+                "symbol":  str(getattr(data, "symbol", "") or ""),
+                "side":    str(getattr(data, "side", "") or ""),
+                "status":  str(getattr(data, "status", "") or ""),
+                "_raw":    data,
+            }
+        except Exception as e:
+            logger.exception(f"[BinanceExchange] place_order failed payload={payload} err={e}")
+            raise
 
         # SL/TP 由 runner.py 在取得實際成交價後呼叫 place_sl_tp_orders() 補掛
         return result
@@ -282,30 +288,38 @@ class BinanceExchange(BaseExchange):
           SL → algo STOP_MARKET（觸發價，市價平倉）
           TP → 限價單 reduce_only（掛在止盈價，maker 手續費）
         """
-        close_side     = NewAlgoOrderSideEnum("SELL" if side == "BUY" else "BUY")
-        close_side_str = "SELL" if side == "BUY" else "BUY"
+        try:
+            close_side     = NewAlgoOrderSideEnum("SELL" if side == "BUY" else "BUY")
+            close_side_str = "SELL" if side == "BUY" else "BUY"
 
-        # 止損：algo STOP_MARKET
-        self._client.rest_api.new_algo_order(
-            algo_type="CONDITIONAL",
-            symbol=symbol,
-            side=close_side,
-            type="STOP_MARKET",
-            trigger_price=self._align_price(sl_price, symbol),
-            working_type=NewAlgoOrderWorkingTypeEnum.MARK_PRICE,
-            close_position="true",
-        )
+            # 止損：algo STOP_MARKET
+            self._client.rest_api.new_algo_order(
+                algo_type="CONDITIONAL",
+                symbol=symbol,
+                side=close_side,
+                type="STOP_MARKET",
+                trigger_price=self._align_price(sl_price, symbol),
+                working_type=NewAlgoOrderWorkingTypeEnum.MARK_PRICE,
+                close_position="true",
+                price_protect="TRUE",
+            )
 
-        # 止盈：限價單 reduce_only（maker 手續費）
-        self._client.rest_api.new_order(
-            symbol=symbol,
-            side=NewOrderSideEnum(close_side_str),
-            type="LIMIT",
-            quantity=float(qty),
-            price=self._align_price(tp_price, symbol),
-            time_in_force="GTC",
-            reduce_only="true",
-        )
+            # 止盈：限價單 reduce_only（maker 手續費）
+            self._client.rest_api.new_order(
+                symbol=symbol,
+                side=NewOrderSideEnum(close_side_str),
+                type="LIMIT",
+                quantity=float(qty),
+                price=self._align_price(tp_price, symbol),
+                time_in_force="GTC",
+                reduce_only="true",
+            )
+        except Exception as e:
+            logger.exception(
+                "[BinanceExchange] place_sl_tp_orders failed "
+                f"symbol={symbol} side={side} qty={qty} sl={sl_price} tp={tp_price} err={e}"
+            )
+            raise
 
     # ── 市場資料 ──────────────────────────────────────────────────────────────
 
@@ -388,7 +402,8 @@ class BinanceExchange(BaseExchange):
         url  = f"{self._base_path}/fapi/v1/ticker/24hr"
         resp = _requests.get(url, timeout=10)
         if not resp.ok:
-            raise RuntimeError(f"Binance tickers {resp.status_code}: {resp.text}")
+            logger.warning(f"Binance tickers failed: {resp.status_code} {resp.text}")
+            return []
         raw    = resp.json()
         result = []
         for t in raw:
@@ -405,6 +420,98 @@ class BinanceExchange(BaseExchange):
             except (TypeError, ValueError):
                 continue
         return result
+    
+    def fetch_premium_index_all(self) -> list[dict[str, Any]]:
+        url = f"{self._base_path}/fapi/v1/premiumIndex"
+        r = _requests.get(url, timeout=10)
+        if not r.ok:
+            logger.warning(f"[BinanceExchange] premiumIndex failed: {r.status_code} {r.text}")
+            return []
+        data = r.json()
+        return data if isinstance(data, list) else [data]
+
+
+    def get_top3_symbols_nearest_funding(
+        self,
+        premium_rows: list[dict[str, Any]],
+        threshold_pct: float = -1.0,   # -1%（人類語意）
+    ) -> list[dict[str, Any]]:
+        """
+        回傳 nextFundingTime 最近那批中，funding < threshold_pct 的前三名。
+        """
+        now_ms = int(time.time() * 1000)
+        threshold_raw = threshold_pct / 100.0  # 轉 API raw：-1% -> -0.01
+
+        parsed: list[dict[str, Any]] = []
+        for x in premium_rows:
+            try:
+                symbol = str(x.get("symbol", "") or "")
+                fr_raw = float(x.get("lastFundingRate", 0) or 0)
+                nft = int(x.get("nextFundingTime", 0) or 0)
+                if not symbol or nft <= now_ms:
+                    continue
+                parsed.append({
+                    "symbol": symbol,
+                    "fundingRateRaw": fr_raw,
+                    "fundingRatePct": fr_raw * 100.0,
+                    "nextFundingTime": nft,
+                })
+            except (TypeError, ValueError):
+                continue
+
+        if not parsed:
+            return []
+
+        nearest_time = min(p["nextFundingTime"] for p in parsed)
+        nearest_batch = [p for p in parsed if p["nextFundingTime"] == nearest_time]
+        filtered = [p for p in nearest_batch if p["fundingRateRaw"] < threshold_raw]
+        filtered.sort(key=lambda p: (p["fundingRateRaw"], p["symbol"]))
+
+        return filtered[:3]
+
+
+    def fetch_all_latest_prices_v2(self) -> dict[str, float]:
+        """
+        GET /fapi/v2/ticker/price (不帶 symbol)
+        回傳 symbol -> price map
+        """
+        url = f"{self._base_path}/fapi/v2/ticker/price"
+        r = _requests.get(url, timeout=10)
+        if not r.ok:
+            logger.warning(f"[BinanceExchange] ticker/price v2 failed: {r.status_code} {r.text}")
+            return {}
+
+        rows = r.json()
+        if not isinstance(rows, list):
+            rows = [rows]
+
+        result: dict[str, float] = {}
+        for row in rows:
+            try:
+                symbol = str(row.get("symbol", "") or "")
+                price = float(row.get("price", 0) or 0)
+                if symbol:
+                    result[symbol] = price
+            except (TypeError, ValueError):
+                continue
+        return result
+
+    def place_market_short_with_timing(self, symbol: str, qty: float) -> dict[str, Any]:
+        t0 = int(time.time() * 1000)
+        resp = self.place_order({
+            "symbol": symbol,
+            "side": "SELL",
+            "orderType": "MARKET",
+            "qty": str(qty),
+            "tradeSide": "OPEN",
+        })
+        t1 = int(time.time() * 1000)
+        return {
+            "sendTs": t0,
+            "ackTs": t1,
+            "ackDelayMs": t1 - t0,
+            "order": resp,
+        }
 
 
 # ── 內部輔助 ──────────────────────────────────────────────────────────────────
