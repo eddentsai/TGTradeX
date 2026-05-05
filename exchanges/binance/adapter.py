@@ -299,7 +299,7 @@ class BinanceExchange(BaseExchange):
                 side=close_side,
                 type="STOP_MARKET",
                 trigger_price=self._align_price(sl_price, symbol),
-                working_type=NewAlgoOrderWorkingTypeEnum.MARK_PRICE,
+                working_type=NewAlgoOrderWorkingTypeEnum.CONTRACT_PRICE,
                 close_position="true",
                 price_protect="TRUE",
             )
@@ -323,17 +323,27 @@ class BinanceExchange(BaseExchange):
 
     # ── 市場資料 ──────────────────────────────────────────────────────────────
 
-    def get_klines(self, symbol: str, interval: str, limit: int = 250) -> list[dict[str, Any]]:
+    def get_klines(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int = 250,
+        start_time: int | None = None,
+        end_time: int | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Binance K 線回傳 list of list：
           [0]=open_time [1]=open [2]=high [3]=low [4]=close [5]=volume ...
         轉換為 BaseExchange 標準格式（time, open, high, low, close, volume）。
+        start_time / end_time 為 Unix ms。
         """
         interval_enum = KlineCandlestickDataIntervalEnum(interval)
         resp  = self._client.rest_api.kline_candlestick_data(
             symbol=symbol,
             interval=interval_enum,
             limit=limit,
+            start_time=start_time,
+            end_time=end_time,
         )
         data = resp.data() if callable(resp.data) else resp.data
         rows = data if isinstance(data, list) else getattr(data, "root", [])

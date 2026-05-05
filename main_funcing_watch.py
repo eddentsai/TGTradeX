@@ -36,6 +36,8 @@ load_dotenv()
 # ===== 可調參數 =====
 THRESHOLD_PCT = -0.5          # 入選費率門檻（%）
 CANCEL_THRESHOLD_PCT = -0.3   # 費率回升到高於此值則放棄下單（%）
+TP_RATE_FACTOR = 0.8          # TP = abs(funding_rate) × 此倍數
+SL_PCT = 0.3                  # 固定止損幅度（%），CONTRACT_PRICE 下合約價幾乎不噴
 USE_TESTNET = False
 LEVERAGE = 5
 POSITION_RATIO = 0.02
@@ -80,10 +82,9 @@ def floor_to_precision(x: float, p: int) -> float:
     return math.floor(x * f) / f
 
 
-def calc_short_tp_sl(price: float, threshold_pct: float) -> tuple[float, float]:
-    rate = abs(threshold_pct) / 100.0
-    tp = price * (1 - rate)
-    sl = price * (1 + rate / 2)
+def calc_short_tp_sl(price: float, funding_rate_pct: float) -> tuple[float, float]:
+    tp = price * (1 - abs(funding_rate_pct) / 100.0 * TP_RATE_FACTOR)
+    sl = price * (1 + SL_PCT / 100.0)
     return tp, sl
 
 
@@ -178,7 +179,7 @@ async def _ws_cycle(
             )
             return
 
-        tp_price, sl_price = calc_short_tp_sl(price_5958, THRESHOLD_PCT)
+        tp_price, sl_price = calc_short_tp_sl(price_5958, current_rate)
 
         # ── 4. 等到 HH:00:00 ─────────────────────────────────────────────────
         sec = (t00 - now_tpe()).total_seconds()
@@ -237,20 +238,7 @@ async def _ws_cycle(
                 f"fillTime={fmt_ms(fill_ts) if fill_ts else 'N/A'}"
             )
 
-            # ── 7. 掛止損 / 止盈 ─────────────────────────────────────────────
-            ex.place_sl_tp_orders(
-                symbol=symbol,
-                side="SELL",
-                qty=str(qty),
-                sl_price=sl_price,
-                tp_price=tp_price,
-            )
-            logger.info(
-                f"[RISK_ORDERS] symbol={symbol} | qty={qty} | "
-                f"tp={tp_price} | sl={sl_price} | based_on=price_5958({price_5958})"
-            )
-
-            # ── 8. TG 通知 ────────────────────────────────────────────────────
+            # ── 7. TG 通知（先發，不受後續 SL/TP 影響） ─────────────────────
             if notifier:
                 if status == "FILLED":
                     notifier.notify_funding_short(
@@ -268,6 +256,28 @@ async def _ws_cycle(
                         f"⚠️ <b>資金費率空單異常</b>  {symbol}\n"
                         f"orderId={order_id}  status={status}\n"
                         f"費率: {current_rate:.4f}%"
+                    )
+
+            # ── 8. 掛止損 / 止盈 ─────────────────────────────────────────────
+            try:
+                ex.place_sl_tp_orders(
+                    symbol=symbol,
+                    side="SELL",
+                    qty=str(qty),
+                    sl_price=sl_price,
+                    tp_price=tp_price,
+                )
+                logger.info(
+                    f"[RISK_ORDERS] symbol={symbol} | qty={qty} | "
+                    f"tp={tp_price} | sl={sl_price} | based_on=price_5958({price_5958})"
+                )
+            except Exception as e:
+                logger.exception(f"[RISK_ORDERS] failed: {e}")
+                if notifier:
+                    notifier.send(
+                        f"⚠️ <b>SL/TP 掛單失敗</b>  {symbol}\n"
+                        f"orderId={order_id}\n"
+                        f"錯誤: {e}"
                     )
 
             # ── 9. 倉位快照 ───────────────────────────────────────────────────
