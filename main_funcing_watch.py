@@ -22,7 +22,6 @@ from binance_sdk_derivatives_trading_usds_futures.websocket_api.models import (
 )
 from binance_sdk_derivatives_trading_usds_futures.websocket_streams.models import (
     AccountUpdate,
-    UserDataStreamEventsResponse,
 )
 from binance_sdk_derivatives_trading_usds_futures.websocket_streams.websocket_streams import (
     DerivativesTradingUsdsFuturesWebSocketStreams,
@@ -151,18 +150,34 @@ async def _ws_cycle(
 
     try:
         listen_resp = await ws_api.start_user_data_stream()
-        listen_key = listen_resp.data().listen_key
+        listen_key = listen_resp.data().result.listen_key
         ud_handle = await ws_streams.user_data(listen_key)
 
-        def on_user_data(msg: UserDataStreamEventsResponse) -> None:
-            instance = msg.actual_instance
-            if not isinstance(instance, AccountUpdate):
-                return
-            if not (instance.a and instance.a.P):
-                return
-            for pos in instance.a.P:
-                if pos.s == symbol and pos.pa and float(pos.pa) < 0:
-                    position_ready.set()
+        def on_user_data(msg) -> None:
+            # SDK passes a raw dict for UserDataStreamEventsResponse (one_of_schemas model)
+            if isinstance(msg, dict):
+                if msg.get("e") != "ACCOUNT_UPDATE":
+                    return
+                for pos in (msg.get("a") or {}).get("P") or []:
+                    if pos.get("s") == symbol and float(pos.get("pa") or "0") < 0:
+                        logger.info(
+                            f"[USER_DATA] ACCOUNT_UPDATE | symbol={pos.get('s')} | "
+                            f"pa={pos.get('pa')} | ep={pos.get('ep')}"
+                        )
+                        position_ready.set()
+            else:
+                instance = msg.actual_instance
+                if not isinstance(instance, AccountUpdate):
+                    return
+                if not (instance.a and instance.a.P):
+                    return
+                for pos in instance.a.P:
+                    if pos.s == symbol and pos.pa and float(pos.pa) < 0:
+                        logger.info(
+                            f"[USER_DATA] ACCOUNT_UPDATE | symbol={pos.s} | "
+                            f"pa={pos.pa} | ep={pos.ep}"
+                        )
+                        position_ready.set()
 
         ud_handle.on("message", on_user_data)
         logger.info(f"[USER_DATA_STREAM] subscribed | listenKey={listen_key[:8]}...")
