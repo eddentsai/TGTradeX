@@ -20,9 +20,6 @@ from binance_sdk_derivatives_trading_usds_futures.websocket_api.models import (
     NewOrderNewOrderRespTypeEnum,
     NewOrderSideEnum,
 )
-from binance_sdk_derivatives_trading_usds_futures.websocket_streams.models import (
-    AccountUpdate,
-)
 from binance_sdk_derivatives_trading_usds_futures.websocket_streams.websocket_streams import (
     DerivativesTradingUsdsFuturesWebSocketStreams,
 )
@@ -144,45 +141,6 @@ async def _ws_cycle(
     await ws_api.create_connection()
     logger.info(f"[WS_API] connection established for {symbol}")
 
-    # ── 訂閱 User Data Stream，用來確認持倉建立 ──────────────────────────────
-    position_ready = asyncio.Event()
-    ud_handle = None
-
-    try:
-        listen_resp = await ws_api.start_user_data_stream()
-        listen_key = listen_resp.data().result.listen_key
-        ud_handle = await ws_streams.user_data(listen_key)
-
-        def on_user_data(msg) -> None:
-            # SDK passes a raw dict for UserDataStreamEventsResponse (one_of_schemas model)
-            if isinstance(msg, dict):
-                if msg.get("e") != "ACCOUNT_UPDATE":
-                    return
-                for pos in (msg.get("a") or {}).get("P") or []:
-                    if pos.get("s") == symbol and float(pos.get("pa") or "0") < 0:
-                        logger.info(
-                            f"[USER_DATA] ACCOUNT_UPDATE | symbol={pos.get('s')} | "
-                            f"pa={pos.get('pa')} | ep={pos.get('ep')}"
-                        )
-                        position_ready.set()
-            else:
-                instance = msg.actual_instance
-                if not isinstance(instance, AccountUpdate):
-                    return
-                if not (instance.a and instance.a.P):
-                    return
-                for pos in instance.a.P:
-                    if pos.s == symbol and pos.pa and float(pos.pa) < 0:
-                        logger.info(
-                            f"[USER_DATA] ACCOUNT_UPDATE | symbol={pos.s} | "
-                            f"pa={pos.pa} | ep={pos.ep}"
-                        )
-                        position_ready.set()
-
-        ud_handle.on("message", on_user_data)
-        logger.info(f"[USER_DATA_STREAM] subscribed | listenKey={listen_key[:8]}...")
-    except Exception as e:
-        logger.warning(f"[USER_DATA_STREAM] setup failed, will fallback to REST: {e}")
 
     try:
         # ── 2. 等到 HH:59:58，抓取參考價 ────────────────────────────────────
@@ -300,52 +258,29 @@ async def _ws_cycle(
                         f"費率: {current_rate:.4f}%"
                     )
 
-            # ── 8. 等持倉確認後掛止損 / 止盈 ─────────────────────────────────
-            if not position_ready.is_set():
-                try:
-                    await asyncio.wait_for(position_ready.wait(), timeout=3.0)
-                    logger.info(f"[POSITION_READY] confirmed via user data stream | symbol={symbol}")
-                except asyncio.TimeoutError:
-                    logger.warning(f"[POSITION_READY] timeout, falling back to REST check")
+            # ── 8. 等 500ms 後掛止損 / 止盈（讓 Binance 倉位帳本更新） ──────────
+            await asyncio.sleep(0.5)
 
-            positions = ex.get_pending_positions(symbol=symbol)
-            logger.info(
-                f"[POSITION_SNAPSHOT] symbol={symbol} | rows={len(positions)} | data={positions}"
-            )
-
-            if not positions:
-                logger.warning(
-                    f"[RISK_ORDERS] skip: no open position found after fill | "
-                    f"symbol={symbol} | orderId={order_id} | "
-                    f"(possible cause: existing long position was closed instead of opening short)"
+            try:
+                ex.place_sl_tp_orders(
+                    symbol=symbol,
+                    side="SELL",
+                    qty=str(qty),
+                    sl_price=sl_price,
+                    tp_price=tp_price,
                 )
+                logger.info(
+                    f"[RISK_ORDERS] symbol={symbol} | qty={qty} | "
+                    f"tp={tp_price} | sl={sl_price} | entry={avg_price}"
+                )
+            except Exception as e:
+                logger.exception(f"[RISK_ORDERS] failed: {e}")
                 if notifier:
                     notifier.send(
-                        f"⚠️ <b>SL/TP 未掛單</b>  {symbol}\n"
-                        f"成交後查無持倉，可能有既有多單被平倉\n"
-                        f"orderId={order_id}"
+                        f"⚠️ <b>SL/TP 掛單失敗</b>  {symbol}\n"
+                        f"orderId={order_id}\n"
+                        f"錯誤: {e}"
                     )
-            else:
-                try:
-                    ex.place_sl_tp_orders(
-                        symbol=symbol,
-                        side="SELL",
-                        qty=str(qty),
-                        sl_price=sl_price,
-                        tp_price=tp_price,
-                    )
-                    logger.info(
-                        f"[RISK_ORDERS] symbol={symbol} | qty={qty} | "
-                        f"tp={tp_price} | sl={sl_price} | entry={avg_price}"
-                    )
-                except Exception as e:
-                    logger.exception(f"[RISK_ORDERS] failed: {e}")
-                    if notifier:
-                        notifier.send(
-                            f"⚠️ <b>SL/TP 掛單失敗</b>  {symbol}\n"
-                            f"orderId={order_id}\n"
-                            f"錯誤: {e}"
-                        )
 
         except Exception as e:
             logger.exception(f"[WS_ORDER] failed: {e}")
@@ -359,8 +294,6 @@ async def _ws_cycle(
     finally:
         try:
             await stream_handle.unsubscribe()
-            if ud_handle is not None:
-                await ud_handle.unsubscribe()
             await ws_streams.close_connection()
         except Exception:
             pass
