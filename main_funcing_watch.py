@@ -34,13 +34,14 @@ load_dotenv()
 
 
 # ===== 可調參數 =====
-THRESHOLD_PCT = -0.5          # 入選費率門檻（%）
+THRESHOLD_PCT = -1.0          # 入選費率門檻（%）
 CANCEL_THRESHOLD_PCT = -0.3   # 費率回升到高於此值則放棄下單（%）
 TP_RATE_FACTOR = 0.8          # TP = abs(funding_rate) × 此倍數
 SL_PCT = 0.3                  # 固定止損幅度（%），CONTRACT_PRICE 下合約價幾乎不噴
 USE_TESTNET = False
 LEVERAGE = 5
-POSITION_RATIO = 0.02
+POSITION_RATIO = 0.15         # 每筆動用 15% 保證金（notional = balance × ratio × leverage）
+MAX_POSITIONS = 2             # 最多同時下單幾個合約
 TZ = timezone(timedelta(hours=8))  # Asia/Taipei
 
 
@@ -357,25 +358,35 @@ def run() -> None:
         if not top3:
             continue
 
-        target = top3[0]
+        targets = top3[:MAX_POSITIONS]
         t5958 = t59.replace(second=58)
         t00 = t59 + timedelta(minutes=1)
 
-        try:
-            asyncio.run(
-                _ws_cycle(
-                    symbol=target["symbol"],
-                    funding_rate_pct_59=target["fundingRatePct"],
-                    t5958=t5958,
-                    t00=t00,
-                    api_key=api_key,
-                    secret_key=secret_key,
-                    ex=ex,
-                    notifier=notifier,
-                )
+        async def run_all() -> None:
+            results = await asyncio.gather(
+                *[
+                    _ws_cycle(
+                        symbol=t["symbol"],
+                        funding_rate_pct_59=t["fundingRatePct"],
+                        t5958=t5958,
+                        t00=t00,
+                        api_key=api_key,
+                        secret_key=secret_key,
+                        ex=ex,
+                        notifier=notifier,
+                    )
+                    for t in targets
+                ],
+                return_exceptions=True,
             )
+            for t, r in zip(targets, results):
+                if isinstance(r, Exception):
+                    logger.exception(f"ws_cycle failed | symbol={t['symbol']}: {r}")
+
+        try:
+            asyncio.run(run_all())
         except Exception as e:
-            logger.exception(f"ws_cycle failed: {e}")
+            logger.exception(f"run_all failed: {e}")
 
 
 def main() -> None:
