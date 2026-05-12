@@ -53,6 +53,7 @@ class BinanceExchange(BaseExchange):
             api_key=api_key,
             api_secret=secret_key,
             base_path=self._base_path,
+            timeout=10000,  # 10s — 結算時刻 fapi 回應可能超過預設 1s
         )
         self._client = DerivativesTradingUsdsFutures(config_rest_api=config)
         self._tick_cache:           dict[str, float] = {}

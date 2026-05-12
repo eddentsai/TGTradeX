@@ -36,7 +36,7 @@ load_dotenv()
 # ===== 可調參數 =====
 THRESHOLD_PCT = -1.0          # 入選費率門檻（%）
 CANCEL_THRESHOLD_PCT = -0.3   # 費率回升到高於此值則放棄下單（%）
-TP_RATE_FACTOR = 0.8          # TP = abs(funding_rate) × 此倍數
+TP_RATE_FACTOR = 1.5          # TP = abs(funding_rate) × 此倍數
 SL_PCT = 0.3                  # 固定止損幅度（%），CONTRACT_PRICE 下合約價幾乎不噴
 USE_TESTNET = False
 LEVERAGE = 5
@@ -84,7 +84,7 @@ def floor_to_precision(x: float, p: int) -> float:
 
 
 def calc_short_tp_sl(price: float, funding_rate_pct: float) -> tuple[float, float]:
-    tp = price * (1 - abs(funding_rate_pct) / 100.0 * TP_RATE_FACTOR)
+    tp = price * (1 - (abs(funding_rate_pct) / 100.0 * TP_RATE_FACTOR))
     sl = price * (1 + SL_PCT / 100.0)
     return tp, sl
 
@@ -259,8 +259,8 @@ async def _ws_cycle(
                         f"費率: {current_rate:.4f}%"
                     )
 
-            # ── 8. 等 500ms 後掛止損 / 止盈（讓 Binance 倉位帳本更新） ──────────
-            await asyncio.sleep(0.5)
+            # ── 8. 等 3 秒後掛止損 / 止盈（讓 Binance 倉位帳本更新） ──────────
+            await asyncio.sleep(3)
 
             try:
                 ex.place_sl_tp_orders(
