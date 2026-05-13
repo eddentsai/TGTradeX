@@ -260,8 +260,8 @@ async def _ws_cycle(
                         f"費率: {current_rate:.4f}%"
                     )
 
-            # ── 8. 等 3 秒後掛止損 / 止盈（讓 Binance 倉位帳本更新） ──────────
-            await asyncio.sleep(3)
+            # ── 8. 等 80 秒後掛止損 / 止盈（讓 Binance 倉位帳本更新） ──────────
+            await asyncio.sleep(80)
 
             try:
                 ex.place_sl_tp_orders(
