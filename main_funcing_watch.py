@@ -39,6 +39,8 @@ THRESHOLD_PCT = -1.0          # 入選費率門檻（%）
 CANCEL_THRESHOLD_PCT = -0.3   # 費率回升到高於此值則放棄下單（%）
 TP_RATE_FACTOR = 1.5          # TP = abs(funding_rate) × 此倍數
 SL_PCT = 0.3                  # 固定止損幅度（%），CONTRACT_PRICE 下合約價幾乎不噴
+DELAY_ORDER_SLTP_SEC = 80     # 成交後等待幾秒再掛 SL/TP（讓 Binance 倉位帳本更新）
+DELAY_ORDER_MARKET_SEC = 0.1  # 成交前等待幾秒（讓費率更新，避免被收資會費率）
 USE_TESTNET = False
 LEVERAGE = 5
 POSITION_RATIO = 0.15         # 每筆動用 15% 保證金（notional = balance × ratio × leverage）
@@ -187,6 +189,8 @@ async def _ws_cycle(
         if sec > 0:
             await asyncio.sleep(sec)
 
+        await asyncio.sleep(DELAY_ORDER_MARKET_SEC)  # 小睡一下，避免被收資會費率
+
         # ── 5. 確認費率仍符合條件（用 WS stream 最新值） ─────────────────────
         current_rate = latest_funding_rate_pct[0]
         logger.info(
@@ -261,7 +265,7 @@ async def _ws_cycle(
                     )
 
             # ── 8. 等 80 秒後掛止損 / 止盈（讓 Binance 倉位帳本更新） ──────────
-            await asyncio.sleep(80)
+            await asyncio.sleep(DELAY_ORDER_SLTP_SEC)
 
             try:
                 ex.place_sl_tp_orders(
