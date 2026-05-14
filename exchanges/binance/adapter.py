@@ -275,6 +275,24 @@ class BinanceExchange(BaseExchange):
         except Exception:
             pass
 
+    def _fetch_single_price(self, symbol: str) -> float:
+        """取得單一交易對的最新成交價（輕量單點 REST 請求）"""
+        url = f"{self._base_path}/fapi/v2/ticker/price"
+        r = _requests.get(url, params={"symbol": symbol}, timeout=5)
+        r.raise_for_status()
+        return float(r.json().get("price", 0) or 0)
+
+    def _close_at_market(self, symbol: str, side_str: str, qty: str) -> None:
+        """市價平倉（reduce_only）"""
+        self._client.rest_api.new_order(
+            symbol=symbol,
+            side=NewOrderSideEnum(side_str),
+            type="MARKET",
+            quantity=float(qty),
+            reduce_only="true",
+        )
+        logger.info(f"[MARKET_CLOSE] {symbol} {side_str} qty={qty}")
+
     def place_sl_tp_orders(
         self,
         symbol: str,
@@ -283,17 +301,26 @@ class BinanceExchange(BaseExchange):
         sl_price: float,
         tp_price: float,
         position_id: str = "",
+        trail_extension_pct: float = 0.3,
     ) -> None:
         """
         補掛 SL/TP 保護單：
           SL → algo STOP_MARKET（觸發價，市價平倉）
           TP → 限價單 reduce_only（掛在止盈價，maker 手續費）
-        """
-        try:
-            close_side     = NewAlgoOrderSideEnum("SELL" if side == "BUY" else "BUY")
-            close_side_str = "SELL" if side == "BUY" else "BUY"
 
-            # 止損：algo STOP_MARKET
+        若下單時收到 -2021（would immediately trigger），自動判斷方向並處理：
+          - 已超過止損：市價平倉，停損
+          - 已超過止盈：把止損掛在原止盈價（鎖住最低利潤），
+                        止盈順延 trail_extension_pct% 繼續追
+        """
+        close_side     = NewAlgoOrderSideEnum("SELL" if side == "BUY" else "BUY")
+        close_side_str = "SELL" if side == "BUY" else "BUY"
+        is_short       = side == "SELL"
+        position_closed = False
+        active_tp_price = tp_price
+
+        # ── 止損：algo STOP_MARKET ───────────────────────────────────────────────
+        try:
             self._client.rest_api.new_algo_order(
                 algo_type="CONDITIONAL",
                 symbol=symbol,
@@ -304,23 +331,107 @@ class BinanceExchange(BaseExchange):
                 close_position="true",
                 price_protect="TRUE",
             )
+        except Exception as e:
+            if getattr(e, "args", (None,))[0] != -2021:
+                logger.exception(
+                    f"[BinanceExchange] SL order failed symbol={symbol} sl={sl_price} err={e}"
+                )
+                raise
 
-            # 止盈：限價單 reduce_only（maker 手續費）
+            # -2021: 觸發價已被穿越，判斷目前在哪一側
+            try:
+                current_price = self._fetch_single_price(symbol)
+            except Exception:
+                current_price = (sl_price + tp_price) / 2  # 無法取價，保守估計
+
+            sl_breached = (
+                (is_short and current_price >= sl_price)
+                or (not is_short and current_price <= sl_price)
+            )
+            tp_breached = (
+                (is_short and current_price <= tp_price)
+                or (not is_short and current_price >= tp_price)
+            )
+
+            if sl_breached:
+                # 已超過止損 → 市價平倉，停損
+                logger.warning(
+                    f"[SL_BREACH] {symbol}: current={current_price:.6f} past sl={sl_price:.6f}, "
+                    "closing at market to cut loss"
+                )
+                try:
+                    self._close_at_market(symbol, close_side_str, qty)
+                except Exception as me:
+                    logger.exception(f"[SL_BREACH] market close failed: {me}")
+                position_closed = True
+
+            elif tp_breached:
+                # 已超過止盈 → 把止損掛在原止盈價（鎖住利潤），延伸追更多
+                new_sl = tp_price
+                new_tp = (
+                    current_price * (1 - trail_extension_pct / 100)
+                    if is_short
+                    else current_price * (1 + trail_extension_pct / 100)
+                )
+                logger.info(
+                    f"[TP_TRAIL] {symbol}: current={current_price:.6f} past tp={tp_price:.6f} | "
+                    f"protective_sl={new_sl:.6f} | extended_tp={new_tp:.6f} "
+                    f"(trail_extension={trail_extension_pct}%)"
+                )
+                try:
+                    self._client.rest_api.new_algo_order(
+                        algo_type="CONDITIONAL",
+                        symbol=symbol,
+                        side=close_side,
+                        type="STOP_MARKET",
+                        trigger_price=self._align_price(new_sl, symbol),
+                        working_type=NewAlgoOrderWorkingTypeEnum.CONTRACT_PRICE,
+                        close_position="true",
+                        price_protect="TRUE",
+                    )
+                    logger.info(f"[TP_TRAIL] protective SL placed at {new_sl:.6f}")
+                    active_tp_price = new_tp  # 止盈目標延伸到新價位
+                except Exception as se:
+                    if getattr(se, "args", (None,))[0] == -2021:
+                        # 保護性止損也被穿越（行情急速反彈）→ 直接市價平倉
+                        logger.warning(
+                            f"[TP_TRAIL] protective SL also -2021 ({new_sl:.6f}), "
+                            "price reversed — closing at market"
+                        )
+                        try:
+                            self._close_at_market(symbol, close_side_str, qty)
+                        except Exception as me:
+                            logger.exception(f"[TP_TRAIL] market close failed: {me}")
+                        position_closed = True
+                    else:
+                        logger.exception(f"[TP_TRAIL] protective SL failed: {se}")
+
+            else:
+                logger.error(
+                    f"[SL_ORDER] -2021 in ambiguous state: current={current_price:.6f} | "
+                    f"sl={sl_price:.6f} | tp={tp_price:.6f}"
+                )
+                raise
+
+        if position_closed:
+            return
+
+        # ── 止盈：限價單 reduce_only ─────────────────────────────────────────────
+        try:
             self._client.rest_api.new_order(
                 symbol=symbol,
                 side=NewOrderSideEnum(close_side_str),
                 type="LIMIT",
                 quantity=float(qty),
-                price=self._align_price(tp_price, symbol),
+                price=self._align_price(active_tp_price, symbol),
                 time_in_force="GTC",
                 reduce_only="true",
             )
         except Exception as e:
             logger.exception(
-                "[BinanceExchange] place_sl_tp_orders failed "
-                f"symbol={symbol} side={side} qty={qty} sl={sl_price} tp={tp_price} err={e}"
+                f"[BinanceExchange] TP order failed symbol={symbol} tp={active_tp_price} err={e}"
             )
-            raise
+            # SL 已掛，倉位有保護，不 raise
 
     # ── 市場資料 ──────────────────────────────────────────────────────────────
 
