@@ -331,7 +331,8 @@ def run() -> None:
     logger.info("Funding watcher started (TZ=Asia/Taipei)")
     logger.info(
         f"Config | THRESHOLD_PCT={THRESHOLD_PCT}% | CANCEL_THRESHOLD_PCT={CANCEL_THRESHOLD_PCT}% | "
-        f"POSITION_RATIO={POSITION_RATIO*100:.2f}% | LEVERAGE={LEVERAGE} | testnet={USE_TESTNET}"
+        f"POSITION_RATIO={POSITION_RATIO*100:.2f}% | LEVERAGE={LEVERAGE} | "
+        f"delay_market={DELAY_ORDER_MARKET_SEC}s | delay_sltp={DELAY_ORDER_SLTP_SEC}s | testnet={USE_TESTNET}"
     )
 
     while True:
@@ -396,27 +397,32 @@ def run() -> None:
 
 def main() -> None:
     global THRESHOLD_PCT, CANCEL_THRESHOLD_PCT, TP_RATE_FACTOR, SL_PCT
+    global DELAY_ORDER_SLTP_SEC, DELAY_ORDER_MARKET_SEC
     global LEVERAGE, POSITION_RATIO, MAX_POSITIONS, USE_TESTNET
 
     p = argparse.ArgumentParser(description="Funding rate short watcher")
-    p.add_argument("--threshold",        type=float, default=THRESHOLD_PCT,        help=f"入選費率門檻 %（預設 {THRESHOLD_PCT}）")
-    p.add_argument("--cancel-threshold", type=float, default=CANCEL_THRESHOLD_PCT, help=f"取消下單門檻 %（預設 {CANCEL_THRESHOLD_PCT}）")
-    p.add_argument("--tp-factor",        type=float, default=TP_RATE_FACTOR,       help=f"TP = abs(rate) × factor（預設 {TP_RATE_FACTOR}）")
-    p.add_argument("--sl-pct",           type=float, default=SL_PCT,               help=f"固定止損幅度 %（預設 {SL_PCT}）")
-    p.add_argument("--leverage",         type=int,   default=LEVERAGE,             help=f"槓桿倍數（預設 {LEVERAGE}）")
-    p.add_argument("--position-ratio",   type=float, default=POSITION_RATIO,       help=f"每筆保證金比例（預設 {POSITION_RATIO}）")
-    p.add_argument("--max-positions",    type=int,   default=MAX_POSITIONS,        help=f"最多同時下單合約數（預設 {MAX_POSITIONS}）")
-    p.add_argument("--testnet",          action="store_true",                       help="使用 Binance testnet")
+    p.add_argument("--threshold",        type=float, default=THRESHOLD_PCT,           help=f"入選費率門檻 %%（預設 {THRESHOLD_PCT}）")
+    p.add_argument("--cancel-threshold", type=float, default=CANCEL_THRESHOLD_PCT,    help=f"取消下單門檻 %%（預設 {CANCEL_THRESHOLD_PCT}）")
+    p.add_argument("--tp-factor",        type=float, default=TP_RATE_FACTOR,          help=f"TP = abs(rate) × factor（預設 {TP_RATE_FACTOR}）")
+    p.add_argument("--sl-pct",           type=float, default=SL_PCT,                  help=f"固定止損幅度 %%（預設 {SL_PCT}）")
+    p.add_argument("--delay-sltp",       type=float, default=DELAY_ORDER_SLTP_SEC,    help=f"成交後等幾秒再掛 SL/TP（預設 {DELAY_ORDER_SLTP_SEC}s）")
+    p.add_argument("--delay-market",     type=float, default=DELAY_ORDER_MARKET_SEC,  help=f"下市價單前等幾秒（預設 {DELAY_ORDER_MARKET_SEC}s）")
+    p.add_argument("--leverage",         type=int,   default=LEVERAGE,                help=f"槓桿倍數（預設 {LEVERAGE}）")
+    p.add_argument("--position-ratio",   type=float, default=POSITION_RATIO,          help=f"每筆保證金比例（預設 {POSITION_RATIO}）")
+    p.add_argument("--max-positions",    type=int,   default=MAX_POSITIONS,           help=f"最多同時下單合約數（預設 {MAX_POSITIONS}）")
+    p.add_argument("--testnet",          action="store_true",                          help="使用 Binance testnet")
     args = p.parse_args()
 
-    THRESHOLD_PCT        = args.threshold
-    CANCEL_THRESHOLD_PCT = args.cancel_threshold
-    TP_RATE_FACTOR       = args.tp_factor
-    SL_PCT               = args.sl_pct
-    LEVERAGE             = args.leverage
-    POSITION_RATIO       = args.position_ratio
-    MAX_POSITIONS        = args.max_positions
-    USE_TESTNET          = args.testnet
+    THRESHOLD_PCT          = args.threshold
+    CANCEL_THRESHOLD_PCT   = args.cancel_threshold
+    TP_RATE_FACTOR         = args.tp_factor
+    SL_PCT                 = args.sl_pct
+    DELAY_ORDER_SLTP_SEC   = args.delay_sltp
+    DELAY_ORDER_MARKET_SEC = args.delay_market
+    LEVERAGE               = args.leverage
+    POSITION_RATIO         = args.position_ratio
+    MAX_POSITIONS          = args.max_positions
+    USE_TESTNET            = args.testnet
 
     setup_logging()
     run()
