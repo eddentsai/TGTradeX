@@ -109,6 +109,30 @@ async def new_order(symbol: str) -> None:
             f"avgPrice={result.avg_price} | updateTime={result.update_time}"
         )
 
+        if result.status != "FILLED":
+            logging.warning(f"new_order() 未成交，跳過平倉 | status={result.status}")
+            return
+
+        # 成交後等 3 秒再市價平倉
+        logging.info("等待 3 秒後平倉...")
+        await asyncio.sleep(3)
+
+        close_response = await connection.new_order(
+            symbol=symbol,
+            side=NewOrderSideEnum["BUY"].value,
+            type="MARKET",
+            quantity=float(result.executed_qty),
+            reduce_only="true",
+            new_order_resp_type=NewOrderNewOrderRespTypeEnum.RESULT,
+        )
+
+        close_result = close_response.data().result
+        logging.info(
+            f"close_order() | orderId={close_result.order_id} | "
+            f"status={close_result.status} | executedQty={close_result.executed_qty} | "
+            f"avgPrice={close_result.avg_price}"
+        )
+
     except Exception as e:
         logging.error(f"new_order() error: {e}")
     finally:
