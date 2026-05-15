@@ -20,6 +20,7 @@ from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futur
     ConfigurationWebSocketAPI,
 )
 from binance_sdk_derivatives_trading_usds_futures.websocket_api.models import (
+    NewAlgoOrderSideEnum,
     NewOrderNewOrderRespTypeEnum,
     NewOrderSideEnum,
 )
@@ -113,8 +114,36 @@ async def new_order(symbol: str) -> None:
             logging.warning(f"new_order() 未成交，跳過平倉 | status={result.status}")
             return
 
-        # 成交後等 3 秒再市價平倉
-        logging.info("等待 3 秒後平倉...")
+        # 成交後掛止損單：SL 設在進場均價 +0.5%（空單往上止損）
+        avg_price = float(result.avg_price)
+        sl_price = round(avg_price * 1.005, 2)
+        logging.info(f"掛止損單 | avg_price={avg_price} | sl_price={sl_price}")
+
+        algo_response = await connection.new_algo_order(
+            algo_type="CONDITIONAL",
+            symbol=symbol,
+            side=NewAlgoOrderSideEnum["BUY"].value,
+            type="STOP_MARKET",
+            trigger_price=sl_price,
+            working_type="CONTRACT_PRICE",
+            close_position="true",
+            price_protect="TRUE",
+        )
+
+        rate_limits = algo_response.rate_limits
+        logging.info(f"new_algo_order() rate limits: {rate_limits}")
+
+        algo_result = algo_response.data().result
+        logging.info(
+            f"new_algo_order() | algoId={algo_result.algo_id} | "
+            f"algoType={algo_result.algo_type} | orderType={algo_result.order_type} | "
+            f"symbol={algo_result.symbol} | side={algo_result.side} | "
+            f"algoStatus={algo_result.algo_status} | triggerPrice={algo_result.trigger_price} | "
+            f"closePosition={algo_result.close_position} | workingType={algo_result.working_type}"
+        )
+
+        # 等 3 秒後市價平倉（止損單會隨倉位關閉自動取消）
+        logging.info("等待 3 秒後市價平倉...")
         await asyncio.sleep(3)
 
         close_response = await connection.new_order(
