@@ -41,13 +41,13 @@ async def order_book(symbol: str, limit: int) -> None:
         rate_limits = response.rate_limits
         logging.info(f"order_book() rate limits: {rate_limits}")
 
-        data = response.data()
+        result = response.data().result
 
-        bids = data.bids or []
-        asks = data.asks or []
+        bids = result.bids or []
+        asks = result.asks or []
 
         print(f"\n{'─'*50}")
-        print(f"  {symbol}  掛單簿（前 {limit} 檔）  lastUpdateId={data.last_update_id}")
+        print(f"  {symbol}  掛單簿（前 {limit} 檔）  lastUpdateId={result.last_update_id}")
         print(f"{'─'*50}")
         print(f"  {'Ask 價格':>14}  {'Ask 數量':>10}    {'Bid 價格':<14}  {'Bid 數量':<10}")
         print(f"{'─'*50}")
