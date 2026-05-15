@@ -1,22 +1,31 @@
 """
-印出指定合約的掛單簿（前 N 檔買賣掛單）
+掛單簿查詢 + 市價空單測試
 
 用法：
-    python print_order_book.py
+    python print_order_book.py                        # 印掛單簿
     python print_order_book.py --symbol ETHUSDT --limit 10
+    python print_order_book.py --action order         # 下最小單位市價空單
+    python print_order_book.py --action order --symbol ETHUSDT
 """
 import argparse
 import asyncio
 import logging
 import os
 
+from dotenv import load_dotenv
+
 from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (
     DerivativesTradingUsdsFutures,
     DERIVATIVES_TRADING_USDS_FUTURES_WS_API_PROD_URL,
     ConfigurationWebSocketAPI,
 )
+from binance_sdk_derivatives_trading_usds_futures.websocket_api.models import (
+    NewOrderNewOrderRespTypeEnum,
+    NewOrderSideEnum,
+)
 
-from dotenv import load_dotenv
+from exchanges.binance.adapter import BinanceExchange
+from config import settings
 
 load_dotenv()
 
@@ -66,11 +75,58 @@ async def order_book(symbol: str, limit: int) -> None:
             await connection.close_connection(close_session=True)
 
 
+async def new_order(symbol: str) -> None:
+    connection = None
+    try:
+        connection = await client.websocket_api.create_connection()
+
+        # 取最小下單數量：1 step = 10^(-qty_precision)
+        ex = BinanceExchange(
+            api_key=settings.BINANCE_API_KEY.strip(),
+            secret_key=settings.BINANCE_SECRET_KEY.strip(),
+        )
+        qty_precision = await asyncio.to_thread(ex.get_qty_precision, symbol)
+        min_qty = 10 ** (-qty_precision) if qty_precision > 0 else 1.0
+        logging.info(f"new_order() symbol={symbol} | qty_precision={qty_precision} | min_qty={min_qty}")
+
+        response = await connection.new_order(
+            symbol=symbol,
+            side=NewOrderSideEnum["SELL"].value,
+            type="MARKET",
+            quantity=min_qty,
+            reduce_only="false",
+            new_order_resp_type=NewOrderNewOrderRespTypeEnum.RESULT,
+        )
+
+        rate_limits = response.rate_limits
+        logging.info(f"new_order() rate limits: {rate_limits}")
+
+        result = response.data().result
+        logging.info(
+            f"new_order() | orderId={result.order_id} | symbol={result.symbol} | "
+            f"status={result.status} | side={result.side} | type={result.type} | "
+            f"origQty={result.orig_qty} | executedQty={result.executed_qty} | "
+            f"avgPrice={result.avg_price} | updateTime={result.update_time}"
+        )
+
+    except Exception as e:
+        logging.error(f"new_order() error: {e}")
+    finally:
+        if connection:
+            await connection.close_connection(close_session=True)
+
+
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="印出合約掛單簿")
+    p = argparse.ArgumentParser(description="掛單簿查詢 / 市價空單測試")
     p.add_argument("--symbol", default="BTCUSDT")
+    p.add_argument("--action", default="book", choices=["book", "order"],
+                   help="book=印掛單簿, order=下最小單位市價空單")
     p.add_argument("--limit", type=int, default=5,
-                   choices=[5, 10, 20, 50, 100, 500, 1000])
+                   choices=[5, 10, 20, 50, 100, 500, 1000],
+                   help="掛單檔數（--action book 時有效）")
     args = p.parse_args()
 
-    asyncio.run(order_book(args.symbol, args.limit))
+    if args.action == "book":
+        asyncio.run(order_book(args.symbol, args.limit))
+    else:
+        asyncio.run(new_order(args.symbol))
