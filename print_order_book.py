@@ -30,11 +30,6 @@ from binance_sdk_derivatives_trading_usds_futures.websocket_api.models import (
 from exchanges.binance.adapter import BinanceExchange
 from config import settings
 
-THRESHOLD_PCT = -1.0    # 入選費率門檻（%）
-LEVERAGE      = 5
-POSITION_RATIO = 0.15   # 每筆動用 15% 保證金
-TAKER_FEE     = 0.0005  # 0.0500%
-WAIT_SECS     = 20      # dryrun 模擬持倉秒數
 
 
 def floor_to_precision(x: float, p: int) -> float:
@@ -184,7 +179,13 @@ async def new_order(symbol: str) -> None:
             await connection.close_connection(close_session=True)
 
 
-async def dry_run_short() -> None:
+async def dry_run_short(
+    threshold_pct: float,
+    leverage: float,
+    position_ratio: float,
+    taker_fee: float,
+    wait_secs: int,
+) -> None:
     connection = None
     try:
         ex = BinanceExchange(
@@ -195,10 +196,10 @@ async def dry_run_short() -> None:
         # 1. 取得 top3 高費率 symbols
         premium = await asyncio.to_thread(ex.fetch_premium_index_all)
         top3 = await asyncio.to_thread(
-            ex.get_top3_symbols_nearest_funding, premium, THRESHOLD_PCT
+            ex.get_top3_symbols_nearest_funding, premium, threshold_pct
         )
         if not top3:
-            logging.info(f"[DRY_RUN] 無符合門檻（{THRESHOLD_PCT}%）的 symbols")
+            logging.info(f"[DRY_RUN] 無符合門檻（{threshold_pct}%）的 symbols")
             return
 
         logging.info(f"[DRY_RUN] top3 symbols: {[t['symbol'] for t in top3]}")
@@ -223,12 +224,11 @@ async def dry_run_short() -> None:
             bid1 = float(bids[0][0])
             qty_precision = await asyncio.to_thread(ex.get_qty_precision, symbol)
             qty = floor_to_precision(
-                available * POSITION_RATIO * LEVERAGE / bid1, qty_precision
+                available * position_ratio * leverage / bid1, qty_precision
             )
             entry[symbol] = {
                 "bid1": bid1,
                 "qty": qty,
-                "qty_precision": qty_precision,
                 "rate_pct": t["fundingRatePct"],
             }
             logging.info(
@@ -240,8 +240,8 @@ async def dry_run_short() -> None:
             logging.info("[DRY_RUN] 無有效進場資料")
             return
 
-        logging.info(f"[DRY_RUN] 等待 {WAIT_SECS} 秒...")
-        await asyncio.sleep(WAIT_SECS)
+        logging.info(f"[DRY_RUN] 等待 {wait_secs} 秒...")
+        await asyncio.sleep(wait_secs)
 
         # 4. 抓 ask1（模擬出場價），計算 P&L
         print(f"\n{'─'*70}")
@@ -261,8 +261,8 @@ async def dry_run_short() -> None:
             qty = d["qty"]
             notional = bid1 * qty
             pnl_gross = (bid1 - ask1) * qty
-            entry_fee = notional * TAKER_FEE
-            exit_fee  = ask1 * qty * TAKER_FEE
+            entry_fee = notional * taker_fee
+            exit_fee  = ask1 * qty * taker_fee
             pnl_net   = pnl_gross - entry_fee - exit_fee
             pnl_pct   = pnl_net / notional * 100 if notional > 0 else 0.0
             print(
@@ -287,6 +287,16 @@ if __name__ == "__main__":
     p.add_argument("--limit", type=int, default=5,
                    choices=[5, 10, 20, 50, 100, 500, 1000],
                    help="掛單檔數（--action book 時有效）")
+    p.add_argument("--threshold", type=float, default=-1.0,
+                   help="dryrun: 入選費率門檻 %（預設 -1.0）")
+    p.add_argument("--leverage", type=float, default=5.0,
+                   help="dryrun: 槓桿倍數（預設 5）")
+    p.add_argument("--ratio", type=float, default=0.15,
+                   help="dryrun: 每筆動用保證金比例（預設 0.15）")
+    p.add_argument("--taker-fee", type=float, default=0.0005,
+                   help="dryrun: 吃單手續費率（預設 0.0005）")
+    p.add_argument("--wait", type=int, default=20,
+                   help="dryrun: 模擬持倉秒數（預設 20）")
     args = p.parse_args()
 
     if args.action == "book":
@@ -294,4 +304,10 @@ if __name__ == "__main__":
     elif args.action == "order":
         asyncio.run(new_order(args.symbol))
     else:
-        asyncio.run(dry_run_short())
+        asyncio.run(dry_run_short(
+            threshold_pct=args.threshold,
+            leverage=args.leverage,
+            position_ratio=args.ratio,
+            taker_fee=args.taker_fee,
+            wait_secs=args.wait,
+        ))
