@@ -232,11 +232,13 @@ async def dry_run_short(
             qty = floor_to_precision(
                 available * position_ratio * leverage / bid1, qty_precision
             )
+            tick = await asyncio.to_thread(ex._tick_size, symbol)
             entry[symbol] = {
                 "entry_bid1": bid1,
                 "bid1": bid1,
                 "ask1": ask1,
                 "qty": qty,
+                "tick": tick,
                 "rate_pct": t["fundingRatePct"],
             }
             logging.info(
@@ -279,9 +281,10 @@ async def dry_run_short(
                 asks = data.get("a") or []
                 if not bids or not asks:
                     continue
-                new_bid1 = float(bids[0][0])
-                new_ask1 = float(asks[0][0])
                 d = entry[symbol]
+                tick = d["tick"]
+                new_bid1 = round(round(float(bids[0][0]) / tick) * tick, 10) if tick > 0 else float(bids[0][0])
+                new_ask1 = round(round(float(asks[0][0]) / tick) * tick, 10) if tick > 0 else float(asks[0][0])
                 if new_bid1 == d["bid1"] and new_ask1 == d["ask1"]:
                     continue
                 d["bid1"] = new_bid1
