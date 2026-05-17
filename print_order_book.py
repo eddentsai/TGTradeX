@@ -233,16 +233,18 @@ async def dry_run_short(
                 available * position_ratio * leverage / bid1, qty_precision
             )
             tick = await asyncio.to_thread(ex._tick_size, symbol)
+            dec = BinanceExchange._decimals_from_tick(tick)
             entry[symbol] = {
                 "entry_bid1": bid1,
                 "bid1": bid1,
                 "ask1": ask1,
                 "qty": qty,
                 "tick": tick,
+                "dec": dec,
                 "rate_pct": t["fundingRatePct"],
             }
             logging.info(
-                f"[DRY_RUN] {symbol} | entry bid1={bid1} ask1={ask1} | qty={qty} | "
+                f"[DRY_RUN] {symbol} | entry bid1={bid1:.{dec}f} ask1={ask1:.{dec}f} | qty={qty} | "
                 f"rate={t['fundingRatePct']:.4f}%"
             )
         await connection.close_connection(close_session=True)
@@ -295,9 +297,11 @@ async def dry_run_short(
                 pnl_net = pnl_gross - fees
                 pnl_pct = pnl_net / notional * 100 if notional > 0 else 0.0
                 ts = _time.strftime("%H:%M:%S")
+                dec = d["dec"]
+                w = dec + 6  # 整數部分最多5位 + 小數點 + dec位
                 print(
-                    f"  {ts:>8}  {symbol:<12}  {new_bid1:>10.4f}  {new_ask1:>10.4f}"
-                    f"  {pnl_net:>10.4f}  {pnl_pct:>6.4f}%"
+                    f"  {ts:>8}  {symbol:<12}  {new_bid1:>{w}.{dec}f}  {new_ask1:>{w}.{dec}f}"
+                    f"  {pnl_net:>10.4f}  {pnl_pct:>7.4f}%"
                 )
 
         try:
@@ -314,13 +318,15 @@ async def dry_run_short(
             entry_bid1 = d["entry_bid1"]
             exit_ask1  = d["ask1"]
             qty        = d["qty"]
+            dec        = d["dec"]
+            w          = dec + 6
             notional   = entry_bid1 * qty
             pnl_gross  = (entry_bid1 - exit_ask1) * qty
             fees       = (notional + exit_ask1 * qty) * taker_fee
             pnl_net    = pnl_gross - fees
             pnl_pct    = pnl_net / notional * 100 if notional > 0 else 0.0
             print(
-                f"  {symbol:<12}  {entry_bid1:>10.4f}  {exit_ask1:>10.4f}  {qty:>8}"
+                f"  {symbol:<12}  {entry_bid1:>{w}.{dec}f}  {exit_ask1:>{w}.{dec}f}  {qty:>8}"
                 f"  {pnl_net:>10.4f}  {pnl_pct:>7.4f}%  {d['rate_pct']:>7.4f}%"
             )
         print(f"{'─'*80}\n")
