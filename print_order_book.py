@@ -10,10 +10,13 @@
 """
 import argparse
 import asyncio
+import json as _json
 import logging
 import math
 import os
+import time as _time
 
+import aiohttp
 from dotenv import load_dotenv
 
 from binance_sdk_derivatives_trading_usds_futures.derivatives_trading_usds_futures import (
@@ -187,6 +190,8 @@ async def dry_run_short(
     wait_secs: int,
 ) -> None:
     connection = None
+    _aio_session = None
+    ws_stream = None
     try:
         ex = BinanceExchange(
             api_key=settings.BINANCE_API_KEY.strip(),
@@ -209,72 +214,124 @@ async def dry_run_short(
         available = float(acct.get("available") or 0)
         logging.info(f"[DRY_RUN] available balance = {available}")
 
+        # 3. 取進場 snapshot（bid1/ask1）via WS API
         connection = await client.websocket_api.create_connection()
-
-        # 3. 記錄每個 symbol 的 bid1（模擬進場價）
         entry: dict[str, dict] = {}
         for t in top3:
             symbol = t["symbol"]
             resp = await connection.order_book(symbol=symbol, limit=5)
             result = resp.data().result
             bids = result.bids or []
-            if not bids:
-                logging.warning(f"[DRY_RUN] {symbol} 無 bid，跳過")
+            asks = result.asks or []
+            if not bids or not asks:
+                logging.warning(f"[DRY_RUN] {symbol} 無 bid/ask，跳過")
                 continue
             bid1 = float(bids[0][0])
+            ask1 = float(asks[0][0])
             qty_precision = await asyncio.to_thread(ex.get_qty_precision, symbol)
             qty = floor_to_precision(
                 available * position_ratio * leverage / bid1, qty_precision
             )
             entry[symbol] = {
+                "entry_bid1": bid1,
                 "bid1": bid1,
+                "ask1": ask1,
                 "qty": qty,
                 "rate_pct": t["fundingRatePct"],
             }
             logging.info(
-                f"[DRY_RUN] {symbol} | bid1={bid1} | qty={qty} | "
+                f"[DRY_RUN] {symbol} | entry bid1={bid1} ask1={ask1} | qty={qty} | "
                 f"rate={t['fundingRatePct']:.4f}%"
             )
+        await connection.close_connection(close_session=True)
+        connection = None
 
         if not entry:
             logging.info("[DRY_RUN] 無有效進場資料")
             return
 
-        logging.info(f"[DRY_RUN] 等待 {wait_secs} 秒...")
-        await asyncio.sleep(wait_secs)
+        # 4. 訂閱 fstream depth5@100ms，即時追蹤 wait_secs 秒
+        streams = "/".join(f"{s.lower()}@depth5@100ms" for s in entry)
+        stream_url = f"wss://fstream.binance.com/stream?streams={streams}"
+        logging.info(f"[DRY_RUN] 訂閱 fstream: {stream_url}")
 
-        # 4. 抓 ask1（模擬出場價），計算 P&L
-        print(f"\n{'─'*70}")
-        print(f"  {'Symbol':<12}  {'bid1':>10}  {'ask1':>10}  {'qty':>8}  "
-              f"{'PnL_net':>10}  {'PnL%':>7}  {'Rate%':>7}")
-        print(f"{'─'*70}")
+        print(f"\n{'─'*72}")
+        print(f"  {'時間':>8}  {'Symbol':<12}  {'bid1':>10}  {'ask1':>10}  {'即時PnL':>10}  {'PnL%':>7}")
+        print(f"{'─'*72}")
 
+        _aio_session = aiohttp.ClientSession()
+        ws_stream = await _aio_session.ws_connect(stream_url, ssl=True)
+
+        async def _stream_loop() -> None:
+            async for raw_msg in ws_stream:
+                if raw_msg.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                try:
+                    msg = _json.loads(raw_msg.data)
+                except Exception:
+                    continue
+                stream_name = msg.get("stream", "")
+                symbol = stream_name.split("@")[0].upper()
+                if symbol not in entry:
+                    continue
+                data = msg.get("data", {})
+                bids = data.get("b") or []
+                asks = data.get("a") or []
+                if not bids or not asks:
+                    continue
+                new_bid1 = float(bids[0][0])
+                new_ask1 = float(asks[0][0])
+                d = entry[symbol]
+                if new_bid1 == d["bid1"] and new_ask1 == d["ask1"]:
+                    continue
+                d["bid1"] = new_bid1
+                d["ask1"] = new_ask1
+                notional = d["entry_bid1"] * d["qty"]
+                pnl_gross = (d["entry_bid1"] - new_ask1) * d["qty"]
+                fees = (notional + new_ask1 * d["qty"]) * taker_fee
+                pnl_net = pnl_gross - fees
+                pnl_pct = pnl_net / notional * 100 if notional > 0 else 0.0
+                ts = _time.strftime("%H:%M:%S")
+                print(
+                    f"  {ts:>8}  {symbol:<12}  {new_bid1:>10.4f}  {new_ask1:>10.4f}"
+                    f"  {pnl_net:>10.4f}  {pnl_pct:>6.4f}%"
+                )
+
+        try:
+            await asyncio.wait_for(_stream_loop(), timeout=wait_secs)
+        except asyncio.TimeoutError:
+            pass
+
+        # 5. 最終 P&L 匯總
+        print(f"\n{'─'*80}")
+        print(f"  {'Symbol':<12}  {'entry_bid1':>10}  {'exit_ask1':>10}  {'qty':>8}"
+              f"  {'PnL_net':>10}  {'PnL%':>7}  {'Rate%':>7}")
+        print(f"{'─'*80}")
         for symbol, d in entry.items():
-            resp = await connection.order_book(symbol=symbol, limit=5)
-            result = resp.data().result
-            asks = result.asks or []
-            if not asks:
-                logging.warning(f"[DRY_RUN] {symbol} 無 ask，跳過")
-                continue
-            ask1 = float(asks[0][0])
-            bid1 = d["bid1"]
-            qty = d["qty"]
-            notional = bid1 * qty
-            pnl_gross = (bid1 - ask1) * qty
-            entry_fee = notional * taker_fee
-            exit_fee  = ask1 * qty * taker_fee
-            pnl_net   = pnl_gross - entry_fee - exit_fee
-            pnl_pct   = pnl_net / notional * 100 if notional > 0 else 0.0
+            entry_bid1 = d["entry_bid1"]
+            exit_ask1  = d["ask1"]
+            qty        = d["qty"]
+            notional   = entry_bid1 * qty
+            pnl_gross  = (entry_bid1 - exit_ask1) * qty
+            fees       = (notional + exit_ask1 * qty) * taker_fee
+            pnl_net    = pnl_gross - fees
+            pnl_pct    = pnl_net / notional * 100 if notional > 0 else 0.0
             print(
-                f"  {symbol:<12}  {bid1:>10.4f}  {ask1:>10.4f}  {qty:>8}  "
-                f"  {pnl_net:>9.4f}  {pnl_pct:>6.4f}%  {d['rate_pct']:>6.4f}%"
+                f"  {symbol:<12}  {entry_bid1:>10.4f}  {exit_ask1:>10.4f}  {qty:>8}"
+                f"  {pnl_net:>10.4f}  {pnl_pct:>7.4f}%  {d['rate_pct']:>7.4f}%"
             )
-
-        print(f"{'─'*70}\n")
+        print(f"{'─'*80}\n")
 
     except Exception as e:
         logging.error(f"dry_run_short() error: {e}")
     finally:
+        try:
+            if ws_stream is not None:
+                await ws_stream.close()
+            if _aio_session is not None:
+                await _aio_session.close()
+        except Exception:
+            pass
         if connection:
             await connection.close_connection(close_session=True)
 
